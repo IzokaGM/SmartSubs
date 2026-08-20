@@ -1,8 +1,8 @@
-# NuSubs Recovery Analysis
+# SmartSubs Recovery Analysis
 
 ## Result
 
-The supplied workflows contain enough information to recreate a functional NuSubs repository and replay the later development history through the final stable line.
+The supplied workflows contain enough information to recreate a functional SmartSubs repository and replay the later development history through the final stable line.
 
 The final reconstructed build is:
 
@@ -59,23 +59,23 @@ These were reconstructed against the interfaces used by the exact recovered sour
 
 | Workflow | Recovered purpose |
 | --- | --- |
-| `nusubs-ci-full-diagnose-r1.yml` | CI, syntax, tests, Wrangler dry run, diagnostic artifact flow |
-| `nusubs-apply-malay-auto-r2.yml` | Native Malay preference, English fallback, signed Malay Auto URL, diagnostics |
-| `nusubs-m11-translation-repair.yml` | Cue ID based Gemini response mapping, missing cue repair, safe fallback, translation cache stats |
-| `nusubs-m12-smart-source.yml` | Smart English source ranking using video hash, size, filename, source, resolution, codec, HDR, release group |
-| `nusubs-m13-background-pretranslation.yml` | Background pretranslation before player subtitle selection |
-| `nusubs-m14-fast-translation*.yml` | Gemini retry tuning, Retry-After support, minimal thinking, faster batching experiments |
-| `nusubs-m14-1-prefetch-recovery.yml` | Restored stable 180 cue and 24000 char defaults after aggressive M14 tuning |
-| `nusubs-m15-queue-prefetch.yml` | Moved background pretranslation to Cloudflare Queue |
-| `nusubs-m16-queue-join.yml` | Queue job state, dedupe, Queue Join, cache coordination, queue specific translation profile |
-| `nusubs-m17-parallel-translation.yml` | Three parallel Gemini chunks on first queue attempt, conservative retry fallback |
-| `nusubs-m19-performance-instrumentation*.yml` | Gemini latency, prompt size, status, chunk timeline, source fetch timing, queue delay, retry stage diagnostics |
-| `nusubs-m20-final-release.yml` | Public readiness checks, rate limits, security headers, final queue profile, safer malformed token handling |
-| `nusubs-final-stable-hotfix.yml` | First final stability pass, Abort retry work |
-| `nusubs-final-stable-r2.yml` | Per chunk Abort retry while preserving completed chunks |
-| `nusubs-final-stable-r3.yml` | Final stable profile at 160 cues, 20000 chars, concurrency 3 for first queue attempt |
+| `smartsubs-ci-full-diagnose-r1.yml` | CI, syntax, tests, Wrangler dry run, diagnostic artifact flow |
+| `smartsubs-apply-malay-auto-r2.yml` | Native Malay preference, English fallback, signed Malay Auto URL, diagnostics |
+| `smartsubs-m11-translation-repair.yml` | Cue ID based Gemini response mapping, missing cue repair, safe fallback, translation cache stats |
+| `smartsubs-m12-smart-source.yml` | Smart English source ranking using video hash, size, filename, source, resolution, codec, HDR, release group |
+| `smartsubs-m13-background-pretranslation.yml` | Background pretranslation before player subtitle selection |
+| `smartsubs-m14-fast-translation*.yml` | Gemini retry tuning, Retry-After support, minimal thinking, faster batching experiments |
+| `smartsubs-m14-1-prefetch-recovery.yml` | Restored stable 180 cue and 24000 char defaults after aggressive M14 tuning |
+| `smartsubs-m15-queue-prefetch.yml` | Moved background pretranslation to Cloudflare Queue |
+| `smartsubs-m16-queue-join.yml` | Queue job state, dedupe, Queue Join, cache coordination, queue specific translation profile |
+| `smartsubs-m17-parallel-translation.yml` | Three parallel Gemini chunks on first queue attempt, conservative retry fallback |
+| `smartsubs-m19-performance-instrumentation*.yml` | Gemini latency, prompt size, status, chunk timeline, source fetch timing, queue delay, retry stage diagnostics |
+| `smartsubs-m20-final-release.yml` | Public readiness checks, rate limits, security headers, final queue profile, safer malformed token handling |
+| `smartsubs-final-stable-hotfix.yml` | First final stability pass, Abort retry work |
+| `smartsubs-final-stable-r2.yml` | Per chunk Abort retry while preserving completed chunks |
+| `smartsubs-final-stable-r3.yml` | Final stable profile at 160 cues, 20000 chars, concurrency 3 for first queue attempt |
 
-The two files named `nusubs-m19-performance-instrumentation.yml` and `nusubs-m19-performance-instrumentation-1.yml` are byte identical. Their SHA-256 value is:
+The two files named `smartsubs-m19-performance-instrumentation.yml` and `smartsubs-m19-performance-instrumentation-1.yml` are byte identical. Their SHA-256 value is:
 
 `89af4c01f0b36c642797f891934eb362470728fea92fef9f501fe335ff48da21`
 
@@ -151,4 +151,4 @@ Moderate confidence:
 
 - the exact original implementation of the supporting modules listed above, because their original complete file bodies were not embedded in the supplied recovery workflows
 
-The reconstruction therefore aims to reproduce NuSubs behaviour and recovered interfaces, not claim a byte for byte copy of the lost repository.
+The reconstruction therefore aims to reproduce SmartSubs behaviour and recovered interfaces, not claim a byte for byte copy of the lost repository.

@@ -1,6 +1,6 @@
 # SmartSubs recreation starting point
 
-This is the clean SmartSubs source package recreated from the NuSubs `final-stable-m20r3` line.
+This is the clean source package for the recreated SmartSubs `final-stable-m20r3` line.
 
 ## Deliberate safety change
 

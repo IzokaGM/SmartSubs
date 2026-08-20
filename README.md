@@ -1,8 +1,8 @@
-# SmartSubs
+# SmartSubs Recreated
 
 SmartSubs is a Stremio subtitle addon that prefers existing Malay subtitles and falls back to English subtitles from the official OpenSubtitles v3 Stremio addon. When translation is needed, it uses a user supplied Gemini API key, returns Malay as `msa`, caches translated WebVTT in Cloudflare KV, and can pretranslate through Cloudflare Queues.
 
-This repository was reconstructed from recovered NuSubs GitHub Actions workflows and renamed SmartSubs. The final recovered source state follows the `final-stable-m20r3` patch line.
+This repository was reconstructed from the supplied SmartSubs GitHub Actions recovery workflows. The final recovered source state follows the `final-stable-m20r3` patch line.
 
 ## Runtime flow
 
