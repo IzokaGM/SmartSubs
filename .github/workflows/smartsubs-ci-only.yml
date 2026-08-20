@@ -1,0 +1,44 @@
+name: SmartSubs CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: smartsubs-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Verify repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f package.json
+          test -f src/cloudflare-worker.mjs
+          test -f wrangler.jsonc
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Regression tests
+        run: npm test
