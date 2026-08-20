@@ -3,7 +3,9 @@
   "name": "smartsubs",
   "main": "src/index.js",
   "compatibility_date": "2026-08-20",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
   "vars": {
     "GEMINI_MODEL": "gemini-3.5-flash-lite",
     "TRANSLATION_CONCURRENCY": "3",
@@ -13,18 +15,44 @@
   },
   "durable_objects": {
     "bindings": [
-      { "name": "TRANSLATION_JOBS", "class_name": "TranslationJob" }
+      {
+        "name": "TRANSLATION_JOBS",
+        "class_name": "TranslationJob"
+      },
+      {
+        "name": "DIAGNOSTICS",
+        "class_name": "DiagnosticsStore"
+      }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["TranslationJob"] }
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "TranslationJob"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "DiagnosticsStore"
+      ]
+    }
   ],
   "queues": {
     "producers": [
-      { "binding": "TRANSLATION_QUEUE", "queue": "smartsubs-translation" }
+      {
+        "binding": "TRANSLATION_QUEUE",
+        "queue": "smartsubs-translation"
+      }
     ],
     "consumers": [
-      { "queue": "smartsubs-translation", "max_batch_size": 3, "max_batch_timeout": 1, "max_retries": 2 }
+      {
+        "queue": "smartsubs-translation",
+        "max_batch_size": 3,
+        "max_batch_timeout": 1,
+        "max_retries": 2
+      }
     ]
   }
 }
