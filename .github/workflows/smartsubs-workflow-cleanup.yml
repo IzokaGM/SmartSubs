@@ -1,0 +1,103 @@
+name: SmartSubs Workflow Cleanup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Verify cleanup token
+        shell: bash
+        env:
+          CLEANUP_PAT: ${{ secrets.CLEANUP_PAT }}
+        run: |
+          set -Eeuo pipefail
+
+          if [ -z "${CLEANUP_PAT:-}" ]; then
+            echo "ERROR: repository secret CLEANUP_PAT is missing."
+            echo "Create it first, then run this workflow again."
+            exit 1
+          fi
+
+      - name: Checkout with workflow write token
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.CLEANUP_PAT }}
+          persist-credentials: true
+
+      - name: Clean workflow directory
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "FAILED at line $LINENO: $BASH_COMMAND"' ERR
+
+          KEEP=".github/workflows/smartsubs-ci-only.yml"
+
+          if [ ! -f "$KEEP" ]; then
+            echo "ERROR: $KEEP does not exist. Cleanup stopped."
+            exit 1
+          fi
+
+          echo "Workflow files before cleanup:"
+          find .github/workflows -maxdepth 1 -type f -printf '%f\n' | sort
+
+          find .github/workflows -maxdepth 1 -type f \
+            ! -name 'smartsubs-ci-only.yml' \
+            -delete
+
+          echo
+          echo "Workflow files after cleanup:"
+          find .github/workflows -maxdepth 1 -type f -printf '%f\n' | sort
+
+          COUNT="$(find .github/workflows -maxdepth 1 -type f | wc -l)"
+
+          if [ "$COUNT" -ne 1 ]; then
+            echo "ERROR: expected exactly one workflow file after cleanup."
+            exit 1
+          fi
+
+          test -f "$KEEP"
+
+      - name: Commit workflow cleanup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "FAILED at line $LINENO: $BASH_COMMAND"' ERR
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A .github/workflows
+
+          echo "Changes:"
+          git status --short
+
+          if git diff --cached --quiet; then
+            echo "Nothing to clean."
+            exit 0
+          fi
+
+          git commit -m "chore: clean obsolete SmartSubs workflows [skip ci]"
+          git push origin HEAD:main
+
+          git fetch origin main
+
+          LOCAL="$(git rev-parse HEAD)"
+          REMOTE="$(git rev-parse origin/main)"
+
+          echo "local=$LOCAL"
+          echo "remote=$REMOTE"
+
+          if [ "$LOCAL" != "$REMOTE" ]; then
+            echo "ERROR: cleanup push verification failed."
+            exit 1
+          fi
+
+          echo "Cleanup complete. Only smartsubs-ci-only.yml remains."
