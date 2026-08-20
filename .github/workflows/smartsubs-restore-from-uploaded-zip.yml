@@ -1,0 +1,255 @@
+name: SmartSubs Restore From Uploaded ZIP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Verify uploaded ZIP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "FAILED at line $LINENO: $BASH_COMMAND"' ERR
+
+          ZIP='SmartSubs-main (1).zip'
+          EXPECTED_SHA='9a26110d02ef30c94bbcae5f9944f585aa0053d07549466b13bc10dac8f58161'
+
+          test -f "$ZIP"
+
+          ACTUAL_SHA="$(sha256sum "$ZIP" | awk '{print $1}')"
+          echo "ZIP SHA-256: $ACTUAL_SHA"
+
+          if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+            echo "ERROR: uploaded ZIP does not match the known-working file."
+            exit 1
+          fi
+
+      - name: Extract working build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "FAILED at line $LINENO: $BASH_COMMAND"' ERR
+
+          ZIP='SmartSubs-main (1).zip'
+          DEST="$RUNNER_TEMP/smartsubs-working"
+
+          rm -rf "$DEST"
+          mkdir -p "$DEST"
+
+          unzip -q "$ZIP" -d "$DEST"
+
+          SRC="$DEST/SmartSubs-main"
+
+          test -d "$SRC"
+          test -f "$SRC/package.json"
+          test -f "$SRC/wrangler.jsonc"
+          test -f "$SRC/src/cloudflare-worker.mjs"
+          test -f "$SRC/test/nuvio-worker.test.js"
+          test -f "$SRC/test/nuvio-diagnose.test.js"
+
+          echo "Working ZIP extracted successfully."
+
+      - name: Validate exact working build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "FAILED at line $LINENO: $BASH_COMMAND"' ERR
+
+          SRC="$RUNNER_TEMP/smartsubs-working/SmartSubs-main"
+          cd "$SRC"
+
+          node - <<'NODE'
+          const fs = require("fs");
+          const pkg = require("./package.json");
+          const worker = fs.readFileSync("src/cloudflare-worker.mjs", "utf8");
+          const manifest = fs.readFileSync("src/manifest.js", "utf8");
+          const wrangler = fs.readFileSync("wrangler.jsonc", "utf8");
+
+          const checks = [
+            ["package version 1.0.0", pkg.version === "1.0.0"],
+            ["final-stable-m20r3", worker.includes("final-stable-m20r3")],
+            ["Nuvio msa handling", worker.includes("item.lang === 'msa'")],
+            ["manifest version 1.0.0", manifest.includes("version: '1.0.0'")],
+            ["KV binding", wrangler.includes('"SMARTSUBS_CACHE"')],
+            ["Queue binding", wrangler.includes('"SMARTSUBS_TRANSLATION_QUEUE"')]
+          ];
+
+          let failed = false;
+          for (const [name, ok] of checks) {
+            console.log(`${ok ? "OK" : "FAIL"}: ${name}`);
+            if (!ok) failed = true;
+          }
+
+          if (failed) process.exit(1);
+          NODE
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "FAILED at line $LINENO: $BASH_COMMAND"' ERR
+
+          SRC="$RUNNER_TEMP/smartsubs-working/SmartSubs-main"
+          cd "$SRC"
+
+          npm install --no-package-lock --no-audit --no-fund
+
+      - name: Syntax check
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "FAILED at line $LINENO: $BASH_COMMAND"' ERR
+
+          SRC="$RUNNER_TEMP/smartsubs-working/SmartSubs-main"
+          cd "$SRC"
+
+          npm run check
+
+      - name: Run 67 regression tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "FAILED at line $LINENO: $BASH_COMMAND"' ERR
+
+          SRC="$RUNNER_TEMP/smartsubs-working/SmartSubs-main"
+          cd "$SRC"
+
+          npm test 2>&1 | tee "$RUNNER_TEMP/smartsubs-tests.log"
+
+          if ! grep -Eq '(^|[[:space:]])tests[[:space:]]+67([[:space:]]|$)' "$RUNNER_TEMP/smartsubs-tests.log"; then
+            echo "ERROR: expected 67-test summary not found."
+            tail -n 60 "$RUNNER_TEMP/smartsubs-tests.log"
+            exit 1
+          fi
+
+          if grep -Eq '(^|[[:space:]])fail(ed)?[[:space:]]+[1-9][0-9]*([[:space:]]|$)' "$RUNNER_TEMP/smartsubs-tests.log"; then
+            echo "ERROR: test failure summary detected."
+            tail -n 60 "$RUNNER_TEMP/smartsubs-tests.log"
+            exit 1
+          fi
+
+          echo "Verified: 67 tests completed successfully."
+
+      - name: Wrangler dry run
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "FAILED at line $LINENO: $BASH_COMMAND"' ERR
+
+          SRC="$RUNNER_TEMP/smartsubs-working/SmartSubs-main"
+          cd "$SRC"
+
+          npx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/smartsubs-cf-build"
+
+      - name: Replace repository runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "FAILED at line $LINENO: $BASH_COMMAND"' ERR
+
+          ZIP='SmartSubs-main (1).zip'
+          SRC="$RUNNER_TEMP/smartsubs-working/SmartSubs-main"
+
+          # Remove current runtime files but leave Git metadata and workflows alone.
+          find . -mindepth 1 -maxdepth 1 \
+            ! -name '.git' \
+            ! -name '.github' \
+            ! -name "$ZIP" \
+            -exec rm -rf {} +
+
+          # Copy the exact working build, excluding its old workflow files and
+          # temporary dependency directory.
+          tar \
+            --exclude='./.github' \
+            --exclude='./node_modules' \
+            -C "$SRC" \
+            -cf - . \
+            | tar -C . -xf -
+
+          # The ZIP was only a restore source. Remove it from the finished repo.
+          rm -f "$ZIP"
+          rm -rf node_modules
+          rm -f package-lock.json
+
+          test -f src/cloudflare-worker.mjs
+          test ! -f src/index.js
+          test -f test/nuvio-worker.test.js
+
+          echo "Repository runtime replaced with known-working SmartSubs."
+
+      - name: Commit restored runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          trap 'echo "FAILED at line $LINENO: $BASH_COMMAND"' ERR
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Do not modify .github/workflows in this restore commit.
+          git add -A -- . ':(exclude).github'
+
+          echo "Restore changes:"
+          git status --short
+          git diff --cached --stat
+
+          if git diff --cached --quiet; then
+            echo "No runtime changes required."
+            exit 0
+          fi
+
+          git commit -m "restore: exact known-working SmartSubs runtime [skip ci]"
+          git push origin HEAD:main
+
+          git fetch origin main
+
+          LOCAL="$(git rev-parse HEAD)"
+          REMOTE="$(git rev-parse origin/main)"
+
+          echo "local=$LOCAL"
+          echo "remote=$REMOTE"
+
+          if [ "$LOCAL" != "$REMOTE" ]; then
+            echo "ERROR: push verification failed."
+            exit 1
+          fi
+
+      - name: Clean old Actions run history
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          CURRENT="${{ github.run_id }}"
+          REPO="${{ github.repository }}"
+
+          gh api --paginate "repos/$REPO/actions/runs?per_page=100" \
+            --jq '.workflow_runs[].id' > "$RUNNER_TEMP/smartsubs-run-ids.txt"
+
+          while read -r ID; do
+            [ -n "$ID" ] || continue
+            [ "$ID" = "$CURRENT" ] && continue
+            gh api --method DELETE "repos/$REPO/actions/runs/$ID" >/dev/null 2>&1 || true
+          done < "$RUNNER_TEMP/smartsubs-run-ids.txt"
+
+          echo "Old Actions run cleanup attempted."
