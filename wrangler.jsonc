@@ -31,7 +31,7 @@
   "kv_namespaces": [
     {
       "binding": "SMARTSUBS_CACHE",
-      "id": "REPLACE_WITH_KV_NAMESPACE_ID"
+      "id": "4d1aa89065f44614bd7f5b7398f8b5b0"
     }
   ],
   "queues": {
@@ -55,7 +55,7 @@
   "ratelimits": [
     {
       "name": "SMARTSUBS_SUBTITLE_LIMITER",
-      "namespace_id": "9282001",
+      "namespace_id": "2026082001",
       "simple": {
         "limit": 120,
         "period": 60
@@ -63,7 +63,7 @@
     },
     {
       "name": "SMARTSUBS_GENERATE_LIMITER",
-      "namespace_id": "9282002",
+      "namespace_id": "2026082002",
       "simple": {
         "limit": 6,
         "period": 60
