@@ -1,5 +1,5 @@
 node_modules/
+.cf-build/
 .wrangler/
-.dev.vars
 .env
-.DS_Store
+.dev.vars
