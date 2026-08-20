@@ -5,10 +5,10 @@ import { chooseSubtitlePlan, isEnglish, isMalay } from "./selector.js";
 import { fetchSubtitleText, translateSubtitleText } from "./translator.js";
 import { json, parseExtra, sha256Hex, withCors } from "./utils.js";
 
-const BUILD_ID = "m21.1-diagnose";
+const BUILD_ID = "m21.2-nuvio-compat";
 const BASE_MANIFEST = {
   id: "org.smartsubs.malay",
-  version: "2.1.1",
+  version: "2.1.2",
   name: "SmartSubs",
   description: "Fast Smart Malay subtitles using OpenSubtitles v3 and Gemini.",
   resources: ["subtitles"],
@@ -155,7 +155,7 @@ async function smartSubtitles(request, env, route, executionCtx) {
     const result = [];
 
     if (plan.mode === "native" && plan.bestMalay?.item?.url) {
-      result.push({ id: `smartsubs-native-${plan.bestMalay.item.id || "ms"}`, url: plan.bestMalay.item.url, lang: "Malay" });
+      result.push({ id: `smartsubs-native-${plan.bestMalay.item.id || "ms"}`, url: plan.bestMalay.item.url, lang: "ms" });
       scheduleDiagnostic(env, configId, {
         event: "subtitle-result",
         result: "native-malay",
@@ -176,7 +176,7 @@ async function smartSubtitles(request, env, route, executionCtx) {
       const model = config.model || env.GEMINI_MODEL || "gemini-3.5-flash-lite";
       const key = await translationKey(source, model);
       const prefix = route.token ? `/c/${route.token}` : "";
-      result.push({ id: `smartsubs-auto-${key.slice(0, 12)}`, url: `${url.origin}${prefix}/vtt/${key}.vtt`, lang: "Malay Auto" });
+      result.push({ id: `smartsubs-auto-${key.slice(0, 12)}`, url: `${url.origin}${prefix}/vtt/${key}.vtt`, lang: "ms" });
       const subtitleResultTs = Date.now();
       scheduleDiagnostic(env, configId, {
         ts: subtitleResultTs,
