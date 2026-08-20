@@ -1,165 +1,57 @@
-'use strict'
-
-const crypto = require('node:crypto')
-const config = require('./config')
-const { nowMs, roundMs, logPerf } = require('./perf')
-const { isSupportedRequest, fetchOpenSubtitles } = require('./opensubtitles')
-const { getMalaySubtitles, toNativeMalay } = require('./languages')
-const { selectBestEnglish } = require('./selector')
-const { createTranslationToken } = require('./token')
-
-async function emitDiagnostic(options, payload) {
-  if (typeof options.onDiagnostic !== 'function') return
-  try {
-    await options.onDiagnostic(payload)
-  } catch {}
+function parseTime(raw) {
+  const m = String(raw).trim().match(/(?:(\d+):)?(\d{2}):(\d{2})[,.](\d{3})/);
+  if (!m) return null;
+  const h = Number(m[1] || 0);
+  return ((h * 60 + Number(m[2])) * 60 + Number(m[3])) * 1000 + Number(m[4]);
 }
 
-function dedupeSubtitles(subtitles) {
-  const seen = new Set()
-  const output = []
-  for (const subtitle of subtitles || []) {
-    if (!subtitle || !subtitle.url) continue
-    const key = `${String(subtitle.lang || '').trim().toLowerCase()}|${String(subtitle.url).trim()}`
-    if (seen.has(key)) continue
-    seen.add(key)
-    output.push(subtitle)
-  }
-  return output
+function formatTime(ms) {
+  const total = Math.max(0, Math.round(ms));
+  const h = Math.floor(total / 3600000);
+  const m = Math.floor((total % 3600000) / 60000);
+  const s = Math.floor((total % 60000) / 1000);
+  const milli = total % 1000;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(milli).padStart(3, "0")}`;
 }
 
-function buildAutoSubtitle(englishSubtitle, options = {}) {
-  const publicBaseUrl = options.publicBaseUrl ?? config.publicBaseUrl
-  const tokenSecret = options.tokenSecret ?? config.tokenSecret
-  if (!englishSubtitle || !publicBaseUrl || !tokenSecret) return null
-  const token = createTranslationToken(englishSubtitle.url, tokenSecret, englishSubtitle.id)
-  const shortId = crypto.createHash('sha1').update(englishSubtitle.url).digest('hex').slice(0, 12)
-  return {
-    id: `smartsubs-auto-${shortId}`,
-    url: `${String(publicBaseUrl).replace(/\/+$/, '')}/translated/${token}.vtt`,
-    lang: 'msa'
+export function parseSubtitle(text = "") {
+  const clean = String(text).replace(/^\uFEFF/, "").replace(/\r/g, "");
+  const blocks = clean.replace(/^WEBVTT[^\n]*\n+/i, "").split(/\n{2,}/);
+  const cues = [];
+  for (const block of blocks) {
+    const lines = block.split("\n").filter((x) => x.trim().length);
+    const timingIndex = lines.findIndex((line) => line.includes("-->"));
+    if (timingIndex < 0) continue;
+    const [left, rightRaw] = lines[timingIndex].split("-->");
+    const right = rightRaw?.trim().split(/\s+/)[0];
+    const start = parseTime(left);
+    const end = parseTime(right);
+    if (start == null || end == null || end < start) continue;
+    const body = lines.slice(timingIndex + 1).join("\n").trim();
+    if (!body) continue;
+    cues.push({ index: cues.length, start, end, text: body });
   }
+  return cues;
 }
 
-async function handleSubtitles(args, options = {}) {
-  const startedAt = nowMs()
-  const requestId = crypto.randomUUID()
-  if (!isSupportedRequest(args)) {
-    await emitDiagnostic(options, {
-      event: 'subtitle-result',
-      result: 'unsupported-request',
-      type: args && args.type,
-      id: args && args.id,
-      subtitleCount: 0
-    })
-    return { subtitles: [], cacheMaxAge: 60 }
-  }
-
-  try {
-    const upstreamStartedAt = nowMs()
-    const upstream = await fetchOpenSubtitles(args, options)
-    const upstreamMs = roundMs(nowMs() - upstreamStartedAt)
-    const malay = dedupeSubtitles(getMalaySubtitles(upstream))
-    const english = selectBestEnglish(upstream, args.extra || {})
-
-    if (malay.length) {
-      const subtitles = malay.slice(0, 5).map(toNativeMalay)
-      logPerf({
-        requestId,
-        milestone: 'M3',
-        type: args.type,
-        id: args.id,
-        upstreamMs,
-        upstreamCount: upstream.length,
-        malayCount: malay.length,
-        englishFound: Boolean(english),
-        sourceFilenameProvided: Boolean(args.extra && (args.extra.filename || args.extra.fileName || args.extra.file_name)),
-        sourceVideoHashProvided: Boolean(args.extra && args.extra.videoHash),
-        sourceVideoSizeProvided: Boolean(args.extra && args.extra.videoSize),
-        result: 'native-malay',
-        totalMs: roundMs(nowMs() - startedAt)
-      })
-      await emitDiagnostic(options, {
-        event: 'subtitle-result',
-        type: args.type,
-        id: args.id,
-        result: 'native-malay',
-        upstreamCount: upstream.length,
-        malayCount: malay.length,
-        englishFound: Boolean(english),
-        sourceFilenameProvided: Boolean(args.extra && (args.extra.filename || args.extra.fileName || args.extra.file_name)),
-        sourceVideoHashProvided: Boolean(args.extra && args.extra.videoHash),
-        sourceVideoSizeProvided: Boolean(args.extra && args.extra.videoSize),
-        byokConfigured: Boolean(options.apiKey),
-        autoReady: false,
-        subtitleCount: subtitles.length,
-        languages: subtitles.map(item => item.lang)
-      })
-      return { subtitles, cacheMaxAge: 300, staleRevalidate: 120, staleError: 3600 }
-    }
-
-    const apiKey = options.apiKey || ''
-    const auto = english && apiKey ? buildAutoSubtitle(english, options) : null
-    const resultName = auto ? 'auto-malay-ready' : english ? 'byok-not-configured' : 'no-english'
-    logPerf({
-      requestId,
-      milestone: auto ? 'M6' : 'M4',
-      type: args.type,
-      id: args.id,
-      upstreamMs,
-      upstreamCount: upstream.length,
-      malayCount: 0,
-      englishFound: Boolean(english),
-        sourceFilenameProvided: Boolean(args.extra && (args.extra.filename || args.extra.fileName || args.extra.file_name)),
-        sourceVideoHashProvided: Boolean(args.extra && args.extra.videoHash),
-        sourceVideoSizeProvided: Boolean(args.extra && args.extra.videoSize),
-      autoReady: Boolean(auto),
-      byokConfigured: Boolean(apiKey),
-      publicBaseConfigured: Boolean(options.publicBaseUrl ?? config.publicBaseUrl),
-      result: resultName,
-      totalMs: roundMs(nowMs() - startedAt)
-    })
-    await emitDiagnostic(options, {
-      event: 'subtitle-result',
-      type: args.type,
-      id: args.id,
-      result: resultName,
-      upstreamCount: upstream.length,
-      malayCount: 0,
-      englishFound: Boolean(english),
-        sourceFilenameProvided: Boolean(args.extra && (args.extra.filename || args.extra.fileName || args.extra.file_name)),
-        sourceVideoHashProvided: Boolean(args.extra && args.extra.videoHash),
-        sourceVideoSizeProvided: Boolean(args.extra && args.extra.videoSize),
-      byokConfigured: Boolean(apiKey),
-      autoReady: Boolean(auto),
-      subtitleCount: auto ? 1 : 0,
-      languages: auto ? [auto.lang] : []
-    })
-    return {
-      subtitles: auto ? [auto] : [],
-      cacheMaxAge: auto ? 120 : 60,
-      staleRevalidate: 60,
-      staleError: 600
-    }
-  } catch (error) {
-    const message = error && error.message || String(error)
-    console.error(JSON.stringify({
-      tag: 'SMARTSUBS_ERROR',
-      requestId,
-      type: args.type,
-      id: args.id,
-      message
-    }))
-    await emitDiagnostic(options, {
-      event: 'subtitle-result',
-      type: args.type,
-      id: args.id,
-      result: 'error',
-      subtitleCount: 0,
-      error: message.slice(0, 160)
-    })
-    return { subtitles: [], cacheMaxAge: 15, staleError: 60 }
-  }
+export function toVtt(cues = []) {
+  const body = cues.map((cue) => `${formatTime(cue.start)} --> ${formatTime(cue.end)}\n${cue.text}`).join("\n\n");
+  return `WEBVTT\n\n${body}\n`;
 }
 
-module.exports = { dedupeSubtitles, buildAutoSubtitle, handleSubtitles }
+export function buildChunks(cues, targetSize = 110, overlap = 5) {
+  if (!Array.isArray(cues) || cues.length === 0) return [];
+  const chunks = [];
+  for (let start = 0; start < cues.length; start += targetSize) {
+    const end = Math.min(cues.length, start + targetSize);
+    const contextStart = Math.max(0, start - overlap);
+    const contextEnd = Math.min(cues.length, end + overlap);
+    chunks.push({
+      targetStart: start,
+      targetEnd: end,
+      cues: cues.slice(contextStart, contextEnd),
+      targetIndices: cues.slice(start, end).map((c) => c.index),
+    });
+  }
+  return chunks;
+}
