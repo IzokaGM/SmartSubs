@@ -1,4 +1,4 @@
-# SmartSubs M21
+# SmartSubs M21 
 
 Fast Malay subtitles for Stremio using OpenSubtitles v3, Gemini 3.5 Flash-Lite, Cloudflare Queues, and SQLite-backed Durable Objects.
 
