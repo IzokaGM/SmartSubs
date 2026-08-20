@@ -78,7 +78,7 @@ test('M11 maps shuffled Gemini output by id instead of array position', async ()
   assert.deepEqual(output, ['BM A', 'BM B', 'BM C'])
 })
 
-test('M11 falls back only the still-missing cue after semantic retry', async () => {
+test('M21 never inserts original English when a cue remains missing after repair', async () => {
   let call = 0
   const fetchImpl = async () => {
     call++
@@ -91,17 +91,38 @@ test('M11 falls back only the still-missing cue after semantic retry', async () 
     }
   }
 
-  let stats
-  const output = await translateTexts(['A', 'B', 'C'], {
-    apiKey: 'fake', model: 'gemini-test', fetchImpl, retries: 0, semanticRetries: 1,
-    onTranslationStats: value => { stats = value }
+  await assert.rejects(
+    translateTexts(['A', 'B', 'C'], {
+      apiKey: 'fake', model: 'gemini-test', fetchImpl, retries: 0, semanticRetries: 1
+    }),
+    /translation incomplete.*unresolved 1 cue/i
+  )
+  assert.equal(call, 2)
+})
+
+test('M21 retries an unchanged English cue instead of accepting it as Malay', async () => {
+  let call = 0
+  const fetchImpl = async () => {
+    call++
+    return {
+      ok: true,
+      status: 200,
+      json: async () => call === 1
+        ? geminiBody([
+          { id: 0, text: 'BM 0' },
+          { id: 1, text: 'What are you doing?' },
+          { id: 2, text: 'BM 2' }
+        ])
+        : geminiBody([{ id: 1, text: 'Apa yang awak buat?' }])
+    }
+  }
+
+  const output = await translateTexts(['Hello there', 'What are you doing?', 'See you'], {
+    apiKey: 'fake', model: 'gemini-test', fetchImpl, retries: 0, semanticRetries: 1
   })
 
-  assert.deepEqual(output, ['BM A', 'B', 'BM C'])
-  assert.equal(stats.missing, 1)
-  assert.equal(stats.retryRecovered, 0)
-  assert.equal(stats.fallbackCount, 1)
-  assert.equal(stats.final, 3)
+  assert.deepEqual(output, ['BM 0', 'Apa yang awak buat?', 'BM 2'])
+  assert.equal(call, 2)
 })
 
 test('M11 does not silently return all-English when Gemini returns no usable cues', async () => {

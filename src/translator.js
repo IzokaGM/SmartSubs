@@ -247,6 +247,41 @@ function buildIndexedPrompt(items) {
   ].join('\n')
 }
 
+function normaliseDialogueForComparison(text) {
+  return String(text == null ? '' : text)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\{[^}]+\}/g, ' ')
+    .toLowerCase()
+    .replace(/[^a-z0-9' ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+const ENGLISH_UNTRANSLATED_MARKERS = new Set([
+  'a', 'an', 'and', 'are', 'can', 'do', 'does', 'did', 'for', 'from', 'had', 'has', 'have',
+  'he', 'hello', 'her', 'him', 'his', 'how', 'i', 'if', 'in', 'is', 'it', 'me', 'my', 'no',
+  'not', 'of', 'on', 'or', 'our', 'please', 'she', 'so', 'sorry', 'that', 'the', 'their',
+  'them', 'they', 'this', 'to', 'us', 'was', 'we', 'were', 'what', 'when', 'where', 'who',
+  'why', 'will', 'with', 'yes', 'you', 'your'
+])
+
+function looksUntranslatedCue(sourceText, translatedText) {
+  const source = normaliseDialogueForComparison(sourceText)
+  const translated = normaliseDialogueForComparison(translatedText)
+  if (!source || !translated || source !== translated) return false
+
+  const words = source.split(' ').filter(Boolean)
+  if (!words.length) return false
+  const markerCount = words.reduce(
+    (count, word) => count + (ENGLISH_UNTRANSLATED_MARKERS.has(word) ? 1 : 0),
+    0
+  )
+
+  // Proper names and sound effects can legitimately remain unchanged. Only reject an
+  // unchanged cue when it has clear English-language evidence.
+  return markerCount >= 1 && (words.length <= 3 || markerCount >= 2)
+}
+
 function parseIndexedTranslations(body, requestedItems) {
   let parsed
   try {
@@ -276,6 +311,8 @@ function parseIndexedTranslations(body, requestedItems) {
     if (!Number.isInteger(id) || !requestedIds.has(id) || byId.has(id)) continue
     const text = String(row.text == null ? '' : row.text)
     if (!text.trim()) continue
+    const sourceItem = requestedItems.find(item => item.id === id)
+    if (sourceItem && looksUntranslatedCue(sourceItem.text, text)) continue
     byId.set(id, text)
   }
   return byId
@@ -293,7 +330,7 @@ async function translateIndexedItems(items, options = {}) {
     id: Number.isInteger(item.id) ? item.id : index,
     text: String(item.text == null ? '' : item.text)
   }))
-  const maxSemanticRetries = Math.max(0, Math.min(2, Number(options.semanticRetries ?? 1)))
+  const maxSemanticRetries = Math.max(0, Math.min(2, Number(options.semanticRetries ?? 2)))
   const resolved = new Map()
   let firstReceived = 0
   let missingInitial = normalised.length
@@ -319,8 +356,14 @@ async function translateIndexedItems(items, options = {}) {
   }
 
   const retryRecovered = Math.max(0, resolved.size - firstReceived)
-  const fallbackCount = remaining.length
-  for (const item of remaining) resolved.set(item.id, item.text)
+  if (remaining.length) {
+    const preview = remaining.slice(0, 8).map(item => item.id).join(',')
+    const suffix = remaining.length > 8 ? ',...' : ''
+    throw new Error(
+      `Gemini translation incomplete after repair retries: unresolved ${remaining.length} cue(s) [${preview}${suffix}]`
+    )
+  }
+  const fallbackCount = 0
 
   const translations = normalised.map(item => resolved.get(item.id))
   const stats = {
@@ -596,6 +639,8 @@ module.exports = {
   createTranslationPlan,
   requestGemini,
   buildIndexedPrompt,
+  normaliseDialogueForComparison,
+  looksUntranslatedCue,
   parseIndexedTranslations,
   translateIndexedItems,
   translateTexts,
