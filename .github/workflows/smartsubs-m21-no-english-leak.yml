@@ -1,0 +1,215 @@
+name: SmartSubs M21 No English Leak
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Apply M21 translation integrity patch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > /tmp/apply_m21_patch.py <<'PY'
+          from pathlib import Path
+          import re
+
+          translator = Path('src/translator.js')
+          s = translator.read_text(encoding='utf-8')
+
+          if 'function looksUntranslatedCue(' not in s:
+              marker = 'function parseIndexedTranslations(body, requestedItems) {'
+              if marker not in s:
+                  raise SystemExit('translator.js: parseIndexedTranslations marker not found')
+              helper = r'''function normaliseDialogueForComparison(text) {
+            return String(text == null ? '' : text)
+              .replace(/<[^>]+>/g, ' ')
+              .replace(/\{[^}]+\}/g, ' ')
+              .toLowerCase()
+              .replace(/[^a-z0-9' ]+/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim()
+          }
+
+          const ENGLISH_UNTRANSLATED_MARKERS = new Set([
+            'a', 'an', 'and', 'are', 'can', 'do', 'does', 'did', 'for', 'from', 'had', 'has', 'have',
+            'he', 'hello', 'her', 'him', 'his', 'how', 'i', 'if', 'in', 'is', 'it', 'me', 'my', 'no',
+            'not', 'of', 'on', 'or', 'our', 'please', 'she', 'so', 'sorry', 'that', 'the', 'their',
+            'them', 'they', 'this', 'to', 'us', 'was', 'we', 'were', 'what', 'when', 'where', 'who',
+            'why', 'will', 'with', 'yes', 'you', 'your'
+          ])
+
+          function looksUntranslatedCue(sourceText, translatedText) {
+            const source = normaliseDialogueForComparison(sourceText)
+            const translated = normaliseDialogueForComparison(translatedText)
+            if (!source || !translated || source !== translated) return false
+
+            const words = source.split(' ').filter(Boolean)
+            if (!words.length) return false
+            const markerCount = words.reduce(
+              (count, word) => count + (ENGLISH_UNTRANSLATED_MARKERS.has(word) ? 1 : 0),
+              0
+            )
+
+            // Proper names and sound effects can legitimately remain unchanged. Only reject an
+            // unchanged cue when it has clear English-language evidence.
+            return markerCount >= 1 && (words.length <= 3 || markerCount >= 2)
+          }
+
+          '''
+              s = s.replace(marker, helper + marker, 1)
+
+          old_parse = """    const text = String(row.text == null ? '' : row.text)\n    if (!text.trim()) continue\n    byId.set(id, text)\n"""
+          new_parse = """    const text = String(row.text == null ? '' : row.text)\n    if (!text.trim()) continue\n    const sourceItem = requestedItems.find(item => item.id === id)\n    if (sourceItem && looksUntranslatedCue(sourceItem.text, text)) continue\n    byId.set(id, text)\n"""
+          if old_parse in s:
+              s = s.replace(old_parse, new_parse, 1)
+          elif new_parse not in s:
+              raise SystemExit('translator.js: structured translation acceptance block not found')
+
+          old_retry = "const maxSemanticRetries = Math.max(0, Math.min(2, Number(options.semanticRetries ?? 1)))"
+          new_retry = "const maxSemanticRetries = Math.max(0, Math.min(2, Number(options.semanticRetries ?? 2)))"
+          if old_retry in s:
+              s = s.replace(old_retry, new_retry, 1)
+          elif new_retry not in s:
+              raise SystemExit('translator.js: semantic retry line not found')
+
+          old_fallback = """  const retryRecovered = Math.max(0, resolved.size - firstReceived)\n  const fallbackCount = remaining.length\n  for (const item of remaining) resolved.set(item.id, item.text)\n\n  const translations = normalised.map(item => resolved.get(item.id))\n"""
+          new_fallback = """  const retryRecovered = Math.max(0, resolved.size - firstReceived)\n  if (remaining.length) {\n    const preview = remaining.slice(0, 8).map(item => item.id).join(',')\n    const suffix = remaining.length > 8 ? ',...' : ''\n    throw new Error(\n      `Gemini translation incomplete after repair retries: unresolved ${remaining.length} cue(s) [${preview}${suffix}]`\n    )\n  }\n  const fallbackCount = 0\n\n  const translations = normalised.map(item => resolved.get(item.id))\n"""
+          if old_fallback in s:
+              s = s.replace(old_fallback, new_fallback, 1)
+          elif new_fallback not in s:
+              raise SystemExit('translator.js: English fallback block not found')
+
+          old_exports = """  buildIndexedPrompt,\n  parseIndexedTranslations,\n  translateIndexedItems,\n"""
+          new_exports = """  buildIndexedPrompt,\n  normaliseDialogueForComparison,\n  looksUntranslatedCue,\n  parseIndexedTranslations,\n  translateIndexedItems,\n"""
+          if old_exports in s:
+              s = s.replace(old_exports, new_exports, 1)
+          elif new_exports not in s:
+              raise SystemExit('translator.js: export block not found')
+
+          translator.write_text(s, encoding='utf-8')
+
+          m11 = Path('test/m11.test.js')
+          t = m11.read_text(encoding='utf-8')
+          if "M21 never inserts original English" not in t:
+              pattern = re.compile(
+                  r"test\('M11 falls back only the still-missing cue after semantic retry',[\s\S]*?\n\}\)\n\ntest\('M11 does not silently return all-English"
+              )
+              replacement = r'''test('M21 never inserts original English when a cue remains missing after repair', async () => {
+            let call = 0
+            const fetchImpl = async () => {
+              call++
+              return {
+                ok: true,
+                status: 200,
+                json: async () => call === 1
+                  ? geminiBody([{ id: 0, text: 'BM A' }, { id: 2, text: 'BM C' }])
+                  : geminiBody([])
+              }
+            }
+
+            await assert.rejects(
+              translateTexts(['A', 'B', 'C'], {
+                apiKey: 'fake', model: 'gemini-test', fetchImpl, retries: 0, semanticRetries: 1
+              }),
+              /translation incomplete.*unresolved 1 cue/i
+            )
+            assert.equal(call, 2)
+          })
+
+          test('M21 retries an unchanged English cue instead of accepting it as Malay', async () => {
+            let call = 0
+            const fetchImpl = async () => {
+              call++
+              return {
+                ok: true,
+                status: 200,
+                json: async () => call === 1
+                  ? geminiBody([
+                    { id: 0, text: 'BM 0' },
+                    { id: 1, text: 'What are you doing?' },
+                    { id: 2, text: 'BM 2' }
+                  ])
+                  : geminiBody([{ id: 1, text: 'Apa yang awak buat?' }])
+              }
+            }
+
+            const output = await translateTexts(['Hello there', 'What are you doing?', 'See you'], {
+              apiKey: 'fake', model: 'gemini-test', fetchImpl, retries: 0, semanticRetries: 1
+            })
+
+            assert.deepEqual(output, ['BM 0', 'Apa yang awak buat?', 'BM 2'])
+            assert.equal(call, 2)
+          })
+
+          test('M11 does not silently return all-English'''
+              t, count = pattern.subn(lambda _: replacement, t, count=1)
+              if count != 1:
+                  raise SystemExit('test/m11.test.js: old fallback test not found')
+              m11.write_text(t, encoding='utf-8')
+
+          wrangler = Path('wrangler.jsonc')
+          w = wrangler.read_text(encoding='utf-8')
+          if '"SMARTSUBS_CACHE_VERSION": "m8-v1"' in w:
+              w = w.replace('"SMARTSUBS_CACHE_VERSION": "m8-v1"', '"SMARTSUBS_CACHE_VERSION": "m21-v1"', 1)
+          elif '"SMARTSUBS_CACHE_VERSION": "m21-v1"' not in w:
+              raise SystemExit('wrangler.jsonc: SMARTSUBS_CACHE_VERSION not found')
+          wrangler.write_text(w, encoding='utf-8')
+
+          print('M21 no-English-leak patch applied')
+
+          PY
+
+          python /tmp/apply_m21_patch.py
+
+      - name: Verify no original-English fallback remains
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if grep -F "for (const item of remaining) resolved.set(item.id, item.text)" src/translator.js; then
+            echo "Original English fallback still exists."
+            exit 1
+          fi
+
+          grep -F "Gemini translation incomplete after repair retries" src/translator.js
+          grep -F '"SMARTSUBS_CACHE_VERSION": "m21-v1"' wrangler.jsonc
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Regression tests
+        run: npm test
+
+      - name: Commit M21 fix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add src/translator.js test/m11.test.js wrangler.jsonc
+          git commit -m "Fix English leakage in Malay translation"
+          git push origin HEAD:main
