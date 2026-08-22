@@ -1,6 +1,6 @@
 'use strict'
 
-const { getEnglishSubtitles } = require('./languages')
+const { getEnglishSubtitles, getMalaySubtitles } = require('./languages')
 
 const SOURCE_PATTERNS = [
   ['webdl', /\bweb[ ._-]?dl\b/i],
@@ -175,13 +175,64 @@ function scoreEnglishSubtitle(subtitle, index = 0, context = {}) {
   return score
 }
 
+function subtitleMatchConfidence(subtitle, index = 0, context = {}, score = null) {
+  const actualScore = Number.isFinite(Number(score))
+    ? Number(score)
+    : scoreEnglishSubtitle(subtitle, index, context)
+  const baseScore = 10000 - index
+  const scoreUplift = actualScore - baseScore
+
+  if (context.videoHash && exactMetadataMatch(subtitle, context.videoHash)) {
+    return { level: 'STRONG', reason: 'exact-video-hash', scoreUplift }
+  }
+
+  if (context.videoSize && exactMetadataMatch(subtitle, context.videoSize)) {
+    return { level: 'STRONG', reason: 'exact-video-size', scoreUplift }
+  }
+
+  if (scoreUplift >= 700) {
+    return { level: 'STRONG', reason: 'strong-release-match', scoreUplift }
+  }
+
+  if (scoreUplift >= 250) {
+    return { level: 'LIMITED', reason: 'partial-release-match', scoreUplift }
+  }
+
+  return { level: 'WEAK', reason: 'insufficient-sync-evidence', scoreUplift }
+}
+
 function rankEnglishSubtitles(subtitles, context = {}) {
   return getEnglishSubtitles(subtitles)
-    .map((subtitle, index) => ({
-      subtitle,
-      score: scoreEnglishSubtitle(subtitle, index, context)
-    }))
+    .map((subtitle, index) => {
+      const score = scoreEnglishSubtitle(subtitle, index, context)
+      return {
+        subtitle,
+        score,
+        confidence: subtitleMatchConfidence(subtitle, index, context, score)
+      }
+    })
     .sort((a, b) => b.score - a.score)
+}
+
+function scoreMalaySubtitle(subtitle, index = 0, context = {}) {
+  return scoreEnglishSubtitle(subtitle, index, context)
+}
+
+function rankMalaySubtitles(subtitles, context = {}) {
+  return getMalaySubtitles(subtitles)
+    .map((subtitle, index) => {
+      const score = scoreMalaySubtitle(subtitle, index, context)
+      return {
+        subtitle,
+        score,
+        confidence: subtitleMatchConfidence(subtitle, index, context, score)
+      }
+    })
+    .sort((a, b) => b.score - a.score)
+}
+
+function selectBestMalay(subtitles, context = {}) {
+  return rankMalaySubtitles(subtitles, context)[0]?.subtitle || null
 }
 
 function selectBestEnglish(subtitles, context = {}) {
@@ -193,6 +244,10 @@ module.exports = {
   metadataText,
   releaseGroup,
   scoreEnglishSubtitle,
+  subtitleMatchConfidence,
   rankEnglishSubtitles,
-  selectBestEnglish
+  selectBestEnglish,
+  scoreMalaySubtitle,
+  rankMalaySubtitles,
+  selectBestMalay
 }

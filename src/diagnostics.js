@@ -16,10 +16,17 @@ function sanitiseEvent(event = {}) {
   const allowed = [
     'type', 'id', 'result', 'error', 'cache', 'status',
     'upstreamCount', 'malayCount', 'subtitleCount',
-    'englishFound', 'byokConfigured', 'autoReady', 'languages', 'totalMs',
+    'malayCandidateCount', 'malaySelectedId', 'malaySelectedScore', 'malayTop',
+    'nativeConfidence', 'nativeConfidenceReason', 'nativeScoreUplift', 'nativeDecision',
+    'autoFallbackOffered', 'autoPrefetch', 'autoPrefetchReason', 'geminiPrefetchAvoided',
+    'englishFound', 'englishTrackCount', 'byokConfigured', 'autoReady', 'languages', 'totalMs',
+    'englishConfidence', 'englishConfidenceReason', 'englishScoreUplift',
+    'sourceFilenameProvided', 'sourceVideoHashProvided', 'sourceVideoSizeProvided',
+    'sourceFilename', 'requestExtraKeys', 'englishCandidateCount', 'englishSelectedId',
+    'englishSelectedScore', 'englishSelectionStable', 'englishTop',
     'expected', 'received', 'missing', 'retryRecovered', 'fallbackCount', 'final',
     'semanticRetriesUsed', 'chunks', 'geminiCalls', 'rateLimits', 'transientRetries',
-    'retryWaitMs', 'chunkItems', 'chunkChars', 'concurrency', 'attempts', 'waitMs', 'polls', 'joinStatus', 'reason', 'profile',
+    'retryWaitMs', 'chunkItems', 'chunkChars', 'concurrency', 'attempts', 'waitMs', 'polls', 'joinStatus', 'reason', 'profile', 'delivery',
     'queueDelayMs', 'sourceFetchMs', 'parseMs', 'sourceBytes', 'cueCount', 'pipelineMs',
     'translationWallMs', 'chunkTimeline', 'maxChunkMs', 'avgChunkMs', 'sumChunkMs',
     'geminiCallMs', 'geminiStatuses', 'geminiPromptChars', 'failureStage',
@@ -76,6 +83,8 @@ function deriveVerdict(events = []) {
   const lastTranslationRequest = rows.find(
     item => item.event === 'translation-request' && item.status !== 'prefetch'
   )
+  const lastTranslationPending = rows.find(item => item.event === 'translation-pending')
+  const lastPlayerTranslationQueued = rows.find(item => item.event === 'player-translation-queued')
   const lastPrefetchTranslationRequest = rows.find(
     item => item.event === 'translation-request' && item.status === 'prefetch'
   )
@@ -97,6 +106,8 @@ function deriveVerdict(events = []) {
   }
   if (lastTranslationDelivered && Number(lastTranslationDelivered.ts) >= Number(lastSubtitle.ts)) return 'TRANSLATION_DELIVERED'
   if (lastTranslationFailed && Number(lastTranslationFailed.ts) >= Number(lastSubtitle.ts)) return 'TRANSLATION_FAILED'
+  if (lastTranslationPending && Number(lastTranslationPending.ts) >= Number(lastSubtitle.ts)) return 'TRANSLATION_PREPARING_IN_QUEUE'
+  if (lastPlayerTranslationQueued && Number(lastPlayerTranslationQueued.ts) >= Number(lastSubtitle.ts)) return 'TRANSLATION_PREPARING_IN_QUEUE'
   if (lastQueueJoinStart && Number(lastQueueJoinStart.ts) >= Number(lastSubtitle.ts)) return 'QUEUE_JOIN_WAITING'
   if (lastTranslationRequest && Number(lastTranslationRequest.ts) >= Number(lastSubtitle.ts)) return 'TRANSLATION_REQUESTED_WAITING_FOR_RESULT'
   if (lastQueueComplete && Number(lastQueueComplete.ts) >= Number(lastSubtitle.ts)) return 'QUEUE_PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION'
@@ -106,6 +117,7 @@ function deriveVerdict(events = []) {
   if (lastPrefetchComplete && Number(lastPrefetchComplete.ts) >= Number(lastSubtitle.ts)) return 'PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION'
   if (lastPrefetchFailed && Number(lastPrefetchFailed.ts) >= Number(lastSubtitle.ts)) return 'PREFETCH_FAILED_WAITING_FOR_PLAYER_SELECTION'
   if (lastPrefetchTranslationRequest && Number(lastPrefetchTranslationRequest.ts) >= Number(lastSubtitle.ts)) return 'PREFETCH_TRANSLATING'
+  if (lastSubtitle.result === 'native-malay-with-auto-fallback') return 'NATIVE_MALAY_WITH_AUTO_FALLBACK'
   if (lastSubtitle.autoReady) return 'SUBTITLE_RETURNED_WAITING_FOR_PLAYER_SELECTION'
   return 'SUBTITLE_RETURNED'
 }

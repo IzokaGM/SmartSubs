@@ -5,7 +5,7 @@ const config = require('./config')
 const { nowMs, roundMs, logPerf } = require('./perf')
 const { isSupportedRequest, fetchOpenSubtitles } = require('./opensubtitles')
 const { getMalaySubtitles, toNativeMalay } = require('./languages')
-const { selectBestEnglish } = require('./selector')
+const { selectBestEnglish, rankEnglishSubtitles, rankMalaySubtitles } = require('./selector')
 const { createTranslationToken } = require('./token')
 
 async function emitDiagnostic(options, payload) {
@@ -28,6 +28,43 @@ function dedupeSubtitles(subtitles) {
   return output
 }
 
+function sourceFilename(extra = {}) {
+  const value = String(extra.filename || extra.fileName || extra.file_name || '').trim()
+  if (!value) return ''
+  return value.split(/[\\/]/).pop() || value
+}
+
+function diagnosticSubtitleId(subtitle, index = 0) {
+  if (!subtitle || typeof subtitle !== 'object') return `index-${index}`
+  const value = subtitle.id ?? subtitle.file_id ?? subtitle.fileId ?? subtitle.subtitle_id ?? subtitle.subtitleId
+  return value == null || value === '' ? `index-${index}` : String(value)
+}
+
+function englishSelectionDiagnostics(upstream, selectedEnglish, extra = {}) {
+  const ranked = rankEnglishSubtitles(upstream, extra)
+  const top = ranked.slice(0, 5)
+  const selectedEntry = ranked.find(item => item.subtitle === selectedEnglish) || null
+  const rankedWinner = ranked[0]?.subtitle || null
+
+  return {
+    sourceFilenameProvided: Boolean(extra && (extra.filename || extra.fileName || extra.file_name)),
+    sourceVideoHashProvided: Boolean(extra && extra.videoHash),
+    sourceVideoSizeProvided: Boolean(extra && extra.videoSize),
+    sourceFilename: sourceFilename(extra),
+    requestExtraKeys: Object.keys(extra || {}).sort().slice(0, 8),
+    englishCandidateCount: ranked.length,
+    englishSelectedId: selectedEnglish ? diagnosticSubtitleId(selectedEnglish) : '',
+    englishSelectedScore: selectedEntry ? selectedEntry.score : null,
+    englishConfidence: selectedEntry?.confidence?.level || '',
+    englishConfidenceReason: selectedEntry?.confidence?.reason || '',
+    englishScoreUplift: selectedEntry?.confidence?.scoreUplift ?? null,
+    englishSelectionStable: selectedEnglish === rankedWinner,
+    englishTop: top.map((item, index) =>
+      `${index + 1}:${diagnosticSubtitleId(item.subtitle, index)}:${item.score}`
+    )
+  }
+}
+
 function buildAutoSubtitle(englishSubtitle, options = {}) {
   const publicBaseUrl = options.publicBaseUrl ?? config.publicBaseUrl
   const tokenSecret = options.tokenSecret ?? config.tokenSecret
@@ -39,6 +76,20 @@ function buildAutoSubtitle(englishSubtitle, options = {}) {
     url: `${String(publicBaseUrl).replace(/\/+$/, '')}/translated/${token}.vtt`,
     lang: 'msa'
   }
+}
+
+function buildEnglishTracks(upstream, extra = {}, limit = 5) {
+  const maxTracks = Math.max(1, Math.min(5, Number(limit) || 5))
+  return rankEnglishSubtitles(dedupeSubtitles(upstream), extra)
+    .slice(0, maxTracks)
+    .map((item, index) => {
+      const subtitle = item.subtitle
+      return {
+        id: `smartsubs-eng-${diagnosticSubtitleId(subtitle, index)}`,
+        url: String(subtitle.url),
+        lang: 'eng'
+      }
+    })
 }
 
 async function handleSubtitles(args, options = {}) {
@@ -59,47 +110,113 @@ async function handleSubtitles(args, options = {}) {
     const upstreamStartedAt = nowMs()
     const upstream = await fetchOpenSubtitles(args, options)
     const upstreamMs = roundMs(nowMs() - upstreamStartedAt)
-    const malay = dedupeSubtitles(getMalaySubtitles(upstream))
+    const rankedMalay = rankMalaySubtitles(
+      dedupeSubtitles(getMalaySubtitles(upstream)),
+      args.extra || {}
+    )
+    const malay = rankedMalay.map(item => item.subtitle)
+    const malaySelectionDiagnostic = {
+      malayCandidateCount: rankedMalay.length,
+      malaySelectedId: rankedMalay[0] ? diagnosticSubtitleId(rankedMalay[0].subtitle) : '',
+      malaySelectedScore: rankedMalay[0] ? rankedMalay[0].score : null,
+      nativeConfidence: rankedMalay[0]?.confidence?.level || 'NONE',
+      nativeConfidenceReason: rankedMalay[0]?.confidence?.reason || 'no-native-malay',
+      nativeScoreUplift: rankedMalay[0]?.confidence?.scoreUplift ?? null,
+      malayTop: rankedMalay.slice(0, 5).map((item, index) =>
+        `${index + 1}:${diagnosticSubtitleId(item.subtitle, index)}:${item.score}`
+      )
+    }
     const english = selectBestEnglish(upstream, args.extra || {})
+    const selectionDiagnostic = englishSelectionDiagnostics(
+      upstream,
+      english,
+      args.extra || {}
+    )
+
+    const apiKey = options.apiKey || ''
+    const auto = english && apiKey ? buildAutoSubtitle(english, options) : null
+    const englishTracks = options.includeEnglishTracks
+      ? buildEnglishTracks(upstream, args.extra || {}, options.englishTrackLimit)
+      : []
 
     if (malay.length) {
-      const subtitles = malay.slice(0, 5).map(toNativeMalay)
+      const nativeSubtitles = malay.slice(0, 5).map(toNativeMalay)
+      const nativeConfidence = malaySelectionDiagnostic.nativeConfidence
+      const nativeStrong = nativeConfidence === 'STRONG'
+      const autoFallbackOffered = Boolean(auto) && !nativeStrong
+      const nativeDecision = nativeStrong
+        ? 'native-only-strong'
+        : autoFallbackOffered
+          ? 'dual-fallback'
+          : 'native-only-auto-unavailable'
+      const autoPrefetch = false
+      const autoPrefetchReason = nativeStrong
+        ? 'native-strong-no-auto-needed'
+        : autoFallbackOffered
+          ? 'weak-native-wait-for-user-selection'
+          : 'auto-unavailable'
+      const malayOptions = autoFallbackOffered
+        ? [...nativeSubtitles, auto]
+        : nativeSubtitles
+      const subtitles = [...malayOptions, ...englishTracks]
+      const resultName = autoFallbackOffered
+        ? 'native-malay-with-auto-fallback'
+        : 'native-malay'
+
       logPerf({
         requestId,
-        milestone: 'M3',
+        milestone: 'SMARTSUBS-P3',
         type: args.type,
         id: args.id,
         upstreamMs,
         upstreamCount: upstream.length,
         malayCount: malay.length,
+        ...malaySelectionDiagnostic,
         englishFound: Boolean(english),
-        sourceFilenameProvided: Boolean(args.extra && (args.extra.filename || args.extra.fileName || args.extra.file_name)),
-        sourceVideoHashProvided: Boolean(args.extra && args.extra.videoHash),
-        sourceVideoSizeProvided: Boolean(args.extra && args.extra.videoSize),
-        result: 'native-malay',
+        ...selectionDiagnostic,
+        nativeDecision,
+        autoFallbackOffered,
+        autoPrefetch,
+        autoPrefetchReason,
+        geminiPrefetchAvoided: true,
+        englishTrackCount: englishTracks.length,
+        result: resultName,
         totalMs: roundMs(nowMs() - startedAt)
       })
+
       await emitDiagnostic(options, {
         event: 'subtitle-result',
         type: args.type,
         id: args.id,
-        result: 'native-malay',
+        result: resultName,
         upstreamCount: upstream.length,
         malayCount: malay.length,
+        ...malaySelectionDiagnostic,
         englishFound: Boolean(english),
-        sourceFilenameProvided: Boolean(args.extra && (args.extra.filename || args.extra.fileName || args.extra.file_name)),
-        sourceVideoHashProvided: Boolean(args.extra && args.extra.videoHash),
-        sourceVideoSizeProvided: Boolean(args.extra && args.extra.videoSize),
-        byokConfigured: Boolean(options.apiKey),
-        autoReady: false,
+        ...selectionDiagnostic,
+        byokConfigured: Boolean(apiKey),
+        autoReady: Boolean(autoFallbackOffered),
+        nativeDecision,
+        autoFallbackOffered,
+        autoPrefetch,
+        autoPrefetchReason,
+        geminiPrefetchAvoided: true,
+        englishTrackCount: englishTracks.length,
         subtitleCount: subtitles.length,
         languages: subtitles.map(item => item.lang)
       })
-      return { subtitles, cacheMaxAge: 300, staleRevalidate: 120, staleError: 3600 }
+
+      return {
+        subtitles,
+        autoPrefetch,
+        autoPrefetchReason,
+        cacheMaxAge: 120,
+        staleRevalidate: 60,
+        staleError: 600
+      }
     }
 
-    const apiKey = options.apiKey || ''
-    const auto = english && apiKey ? buildAutoSubtitle(english, options) : null
+    const subtitles = [...(auto ? [auto] : []), ...englishTracks]
     const resultName = auto ? 'auto-malay-ready' : english ? 'byok-not-configured' : 'no-english'
     logPerf({
       requestId,
@@ -109,13 +226,18 @@ async function handleSubtitles(args, options = {}) {
       upstreamMs,
       upstreamCount: upstream.length,
       malayCount: 0,
+      ...malaySelectionDiagnostic,
       englishFound: Boolean(english),
-        sourceFilenameProvided: Boolean(args.extra && (args.extra.filename || args.extra.fileName || args.extra.file_name)),
-        sourceVideoHashProvided: Boolean(args.extra && args.extra.videoHash),
-        sourceVideoSizeProvided: Boolean(args.extra && args.extra.videoSize),
+        ...selectionDiagnostic,
       autoReady: Boolean(auto),
       byokConfigured: Boolean(apiKey),
       publicBaseConfigured: Boolean(options.publicBaseUrl ?? config.publicBaseUrl),
+      nativeDecision: 'no-native-malay',
+      autoFallbackOffered: false,
+      autoPrefetch: Boolean(auto),
+      autoPrefetchReason: auto ? 'no-native-malay-aggressive-prefetch' : 'auto-unavailable',
+      geminiPrefetchAvoided: false,
+      englishTrackCount: englishTracks.length,
       result: resultName,
       totalMs: roundMs(nowMs() - startedAt)
     })
@@ -126,17 +248,24 @@ async function handleSubtitles(args, options = {}) {
       result: resultName,
       upstreamCount: upstream.length,
       malayCount: 0,
+      ...malaySelectionDiagnostic,
       englishFound: Boolean(english),
-        sourceFilenameProvided: Boolean(args.extra && (args.extra.filename || args.extra.fileName || args.extra.file_name)),
-        sourceVideoHashProvided: Boolean(args.extra && args.extra.videoHash),
-        sourceVideoSizeProvided: Boolean(args.extra && args.extra.videoSize),
+        ...selectionDiagnostic,
       byokConfigured: Boolean(apiKey),
       autoReady: Boolean(auto),
-      subtitleCount: auto ? 1 : 0,
-      languages: auto ? [auto.lang] : []
+      nativeDecision: 'no-native-malay',
+      autoFallbackOffered: false,
+      autoPrefetch: Boolean(auto),
+      autoPrefetchReason: auto ? 'no-native-malay-aggressive-prefetch' : 'auto-unavailable',
+      geminiPrefetchAvoided: false,
+      englishTrackCount: englishTracks.length,
+      subtitleCount: subtitles.length,
+      languages: subtitles.map(item => item.lang)
     })
     return {
-      subtitles: auto ? [auto] : [],
+      subtitles,
+      autoPrefetch: Boolean(auto),
+      autoPrefetchReason: auto ? 'no-native-malay-aggressive-prefetch' : 'auto-unavailable',
       cacheMaxAge: auto ? 120 : 60,
       staleRevalidate: 60,
       staleError: 600
@@ -162,4 +291,10 @@ async function handleSubtitles(args, options = {}) {
   }
 }
 
-module.exports = { dedupeSubtitles, buildAutoSubtitle, handleSubtitles }
+module.exports = {
+  dedupeSubtitles,
+  buildAutoSubtitle,
+  buildEnglishTracks,
+  handleSubtitles,
+  englishSelectionDiagnostics
+}

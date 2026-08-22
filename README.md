@@ -8,19 +8,21 @@ This repository was reconstructed from the supplied SmartSubs GitHub Actions rec
 
 1. Stremio requests subtitles from a configured SmartSubs URL.
 2. SmartSubs forwards the subtitle request to `https://opensubtitles-v3.strem.io`.
-3. Existing Malay subtitles are returned directly.
-4. If Malay is unavailable, SmartSubs ranks English candidates using stream metadata such as filename, video hash, video size, resolution, codec, HDR markers, source type, and release group.
-5. SmartSubs exposes a signed Malay Auto subtitle URL.
+3. Existing Malay subtitles are ranked using release and video metadata. Strong matches are returned directly, while weak matches also offer Malay Auto without spending Gemini quota until selected.
+4. SmartSubs ranks English candidates using stream metadata such as filename, video hash, video size, resolution, codec, HDR markers, source type, and release group.
+5. SmartSubs returns up to five ranked English tracks and exposes a signed Malay Auto subtitle URL when translation is available.
 6. Cloudflare Queue can pretranslate the selected English source before the player opens it.
 7. Gemini translates timed subtitle cues into Malaysian Malay.
 8. Cloudflare KV stores the generated WebVTT for reuse.
 9. Queue Join prevents the player path from translating the same subtitle again while background translation is already running.
+10. A 9000 ms player wait, 600 ms final grace check, and Delivery Relay make completed translations visible even during a stale KV read.
 
 ## Final recovered profile
 
 - Build ID: `final-stable-m20r3`
-- Player translation: 180 cues, 24000 chars, concurrency 2
-- Queue first attempt: 160 cues, 20000 chars, concurrency 3
+- User-selected Queue translation: 160 cues, 20000 chars, concurrency 3
+- Player Queue wait: 9000 ms plus 600 ms grace
+- Background Queue first attempt: 160 cues, 20000 chars, concurrency 3
 - Queue fallback attempt: 180 cues, 24000 chars, concurrency 2
 - Queue consumer concurrency: 1
 - Cache version: `m8-v1`
@@ -28,6 +30,9 @@ This repository was reconstructed from the supplied SmartSubs GitHub Actions rec
 - Gemini default model: `gemini-3.5-flash-lite`
 - Malay language code returned to Stremio: `msa`
 - Translation output: WebVTT
+- Built-in English tracks: up to 5
+- Delivery Relay TTL: 120 seconds
+- Gemini prompt: concise Malaysian Bahasa Melayu
 
 ## Required Cloudflare bindings
 
@@ -39,6 +44,7 @@ The final recovered worker expects:
 - Queue name: `smartsubs-translation`
 - Rate limiter binding: `SMARTSUBS_SUBTITLE_LIMITER`
 - Rate limiter binding: `SMARTSUBS_GENERATE_LIMITER`
+- Durable Object binding: `SMARTSUBS_DELIVERY`
 
 `wrangler.jsonc` keeps the recovered settings. Replace `REPLACE_WITH_KV_NAMESPACE_ID` with the KV namespace ID from your Cloudflare account. The recovered rate limiter namespace IDs are also account specific in practice, so verify them before deployment.
 
@@ -51,7 +57,7 @@ npm test
 npx wrangler deploy --dry-run --outdir .cf-build
 ```
 
-The reconstructed repository passed all 67 recovered Node tests in this package. A live Wrangler dry run was not confirmed in the reconstruction environment because the Wrangler package download timed out.
+The SmartSubsV2 parity migration is covered by 120 Node regression tests, including identity-preservation tests for SmartSubs.
 
 ## Configuration
 

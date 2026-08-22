@@ -22,7 +22,7 @@ SmartSubs runtime work belongs in Cloudflare, not GitHub Actions.
 
 Stremio -> SmartSubs Cloudflare Worker -> OpenSubtitles v3 -> existing Malay or ranked English -> Gemini BYOK -> Malay WebVTT -> Cloudflare KV
 
-The final recovered line can also use Cloudflare Queue for background pretranslation and Queue Join.
+The completed parity line also uses Cloudflare Queue for background pretranslation, Queue Join, a final grace check, and a Delivery Relay for reliable player delivery. It returns ranked native Malay, Malay Auto when appropriate, and built-in English tracks.
 
 ## Stage 1 validation
 
@@ -33,7 +33,7 @@ npm run check
 npm test
 ```
 
-Expected recovered regression result: 67 tests passed, 0 failed.
+Expected parity regression result: 120 tests passed, 0 failed.
 
 ## Stage 2
 
@@ -47,5 +47,6 @@ Required Cloudflare runtime pieces for the final recovered profile:
 - queue `smartsubs-translation`
 - `SMARTSUBS_SUBTITLE_LIMITER` rate limiter
 - `SMARTSUBS_GENERATE_LIMITER` rate limiter
+- `SMARTSUBS_DELIVERY` Durable Object binding
 
 The account-specific IDs in `wrangler.jsonc` must be replaced or configured in Cloudflare before live deployment.

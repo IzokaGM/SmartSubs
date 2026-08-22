@@ -226,27 +226,233 @@ function renderRootDiagnosePage() {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SmartSubs Diagnose</title><style>:root{color-scheme:dark}body{margin:0;background:#101116;color:#f4f4f5;font-family:system-ui,sans-serif}.wrap{max-width:720px;margin:auto;padding:28px 18px}.card{background:#181a21;border:1px solid #30333d;border-radius:16px;padding:20px}code{word-break:break-all;color:#c9ffdc}</style></head><body><main class="wrap"><section class="card"><h1>SmartSubs Diagnose</h1><p>Build: <code>${BUILD_ID}</code></p><p>Open diagnose through your configured SmartSubs URL:</p><code>https://.../c/YOUR_CONFIG_TOKEN/diagnose</code><p>The config token is required so diagnostics stay isolated to that SmartSubs installation.</p></section></main></body></html>`
 }
 
+function formatMalaysiaTime(timestamp) {
+  const value = Number(timestamp || 0)
+  if (!Number.isFinite(value) || value <= 0) return 'Unknown time'
+  try {
+    return `${new Intl.DateTimeFormat('en-MY', {
+      timeZone: 'Asia/Kuala_Lumpur',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false
+    }).format(new Date(value))} MYT`
+  } catch {
+    return `${new Date(value).toISOString()} UTC`
+  }
+}
+
+function formatDuration(value) {
+  const ms = Number(value)
+  if (!Number.isFinite(ms) || ms < 0) return 'Not available'
+  if (ms < 1000) return `${Math.round(ms)} ms`
+  return `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`
+}
+
+function parseEnglishTop(values = []) {
+  if (!Array.isArray(values)) return []
+  return values.map(value => {
+    const text = String(value || '')
+    const match = text.match(/^(\d+):([^:]+):(-?\d+(?:\.\d+)?)$/)
+    if (!match) return { raw: text }
+    return {
+      rank: Number(match[1]),
+      id: match[2],
+      score: Number(match[3])
+    }
+  })
+}
+
+function syncAssessment(lastSubtitle) {
+  if (!lastSubtitle) {
+    return {
+      level: 'UNKNOWN',
+      tone: 'neutral',
+      reason: 'No subtitle request has been recorded yet.'
+    }
+  }
+
+  const ranked = parseEnglishTop(lastSubtitle.englishTop)
+  const top = ranked[0]
+  const second = ranked[1]
+  const gap = top && second && Number.isFinite(top.score) && Number.isFinite(second.score)
+    ? top.score - second.score
+    : null
+  const candidates = Number(lastSubtitle.englishCandidateCount || ranked.length || 0)
+
+  if (lastSubtitle.sourceVideoHashProvided) {
+    return {
+      level: 'STRONG',
+      tone: 'good',
+      reason: 'Player supplied a video hash, which gives SmartSubs a strong sync signal.'
+    }
+  }
+
+  if (lastSubtitle.sourceVideoSizeProvided && lastSubtitle.sourceFilenameProvided) {
+    return {
+      level: 'GOOD',
+      tone: 'good',
+      reason: 'Player supplied both filename and video size, giving the selector useful release evidence.'
+    }
+  }
+
+  if (candidates > 1 && gap !== null && gap <= 5 && !lastSubtitle.sourceVideoSizeProvided) {
+    return {
+      level: 'HIGH RISK',
+      tone: 'bad',
+      reason: `Top English candidates are almost tied${gap !== null ? ` by only ${gap} point${gap === 1 ? '' : 's'}` : ''}, with no video hash or size. Sync may depend heavily on OpenSubtitles ordering.`
+    }
+  }
+
+  if (!lastSubtitle.sourceVideoHashProvided && !lastSubtitle.sourceVideoSizeProvided) {
+    return {
+      level: 'LIMITED',
+      tone: 'warn',
+      reason: lastSubtitle.sourceFilenameProvided
+        ? 'Only the player filename is available. If it is a provider label rather than a real release filename, sync confidence is limited.'
+        : 'The player supplied no filename, video hash, or video size for release matching.'
+    }
+  }
+
+  return {
+    level: 'MODERATE',
+    tone: 'warn',
+    reason: 'Some source metadata is available, but SmartSubs does not have a high-confidence video hash match.'
+  }
+}
+
+function verdictPresentation(verdict) {
+  const map = {
+    NO_SUBTITLE_REQUEST_SEEN: ['Waiting for subtitle request', 'neutral', 'The player has not requested this configured SmartSubs addon yet.'],
+    NATIVE_MALAY_RETURNED: ['Native Malay returned', 'good', 'SmartSubs returned an existing Malay subtitle without Gemini translation.'],
+    NATIVE_MALAY_WITH_AUTO_FALLBACK: ['Native Malay + Auto fallback', 'warn', 'Native Malay sync evidence is weak. Malay Auto is available, but Gemini is not used unless you select it.'],
+    SUBTITLE_REQUEST_FAILED: ['Subtitle request failed', 'bad', 'SmartSubs received the request but the subtitle request failed.'],
+    NO_ENGLISH_SOURCE_FOUND: ['No English source found', 'bad', 'OpenSubtitles returned no recognised English source for Malay Auto.'],
+    BYOK_NOT_CONFIGURED: ['Gemini key not configured', 'bad', 'Malay Auto cannot run until BYOK configuration is valid.'],
+    SUBTITLE_REQUEST_RETURNED_ZERO: ['No subtitle returned', 'bad', 'SmartSubs was requested but returned zero subtitle tracks.'],
+    TRANSLATION_DELIVERED: ['Malay subtitle delivered', 'good', 'The translated Malay VTT was successfully returned to the player.'],
+    TRANSLATION_FAILED: ['Translation failed', 'bad', 'The Malay translation request failed. Check the error event below.'],
+    QUEUE_JOIN_WAITING: ['Waiting for queued translation', 'warn', 'The player selected Malay Auto while the background Queue job is still running.'],
+    TRANSLATION_REQUESTED_WAITING_FOR_RESULT: ['Translation requested', 'warn', 'The player requested Malay Auto and SmartSubs is waiting for the result.'],
+    TRANSLATION_PREPARING_IN_QUEUE: ['Translation preparing', 'warn', 'Malay Auto is translating safely in Cloudflare Queue. Retry or select Malay Auto again shortly.'],
+    QUEUE_PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION: ['Malay Auto ready in cache', 'good', 'Background Queue translation finished before player selection.'],
+    QUEUE_PREFETCH_FAILED_WAITING_FOR_PLAYER_SELECTION: ['Background translation failed', 'bad', 'Queue prefetch failed. Selecting Malay Auto may still retry.'],
+    QUEUE_PREFETCH_TRANSLATING: ['Background translation running', 'warn', 'Cloudflare Queue is translating Malay Auto now.'],
+    QUEUE_PREFETCH_QUEUED: ['Translation queued', 'warn', 'The Malay Auto translation job is safely queued.'],
+    PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION: ['Malay Auto ready', 'good', 'Background translation completed and is waiting for player selection.'],
+    PREFETCH_FAILED_WAITING_FOR_PLAYER_SELECTION: ['Prefetch failed', 'bad', 'Background translation failed.'],
+    PREFETCH_TRANSLATING: ['Prefetch translating', 'warn', 'Malay Auto is translating in the background.'],
+    SUBTITLE_RETURNED_WAITING_FOR_PLAYER_SELECTION: ['Malay Auto offered', 'good', 'SmartSubs returned a Malay Auto track to the player.'],
+    SUBTITLE_RETURNED: ['Subtitle returned', 'good', 'SmartSubs returned a subtitle track.']
+  }
+  const item = map[verdict] || [verdict, 'neutral', 'See the recent events for more detail.']
+  return { title: item[0], tone: item[1], explanation: item[2] }
+}
+
 function renderConfiguredDiagnosePage(configId, events) {
-  const verdict = deriveVerdict(events)
-  const rows = events.map(item => {
-    const timestamp = Number(item.ts || 0)
-    const time = Number.isFinite(timestamp) && timestamp > 0 ? new Date(timestamp).toISOString() : 'unknown'
+  const sorted = [...events].sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))
+  const verdict = deriveVerdict(sorted)
+  const status = verdictPresentation(verdict)
+  const lastSubtitle = sorted.find(item => item.event === 'subtitle-result') || null
+  const lastDelivery = sorted.find(item => item.event === 'translation-delivered') || null
+  const lastQueueComplete = sorted.find(item => item.event === 'queue-translation-complete') || null
+  const lastTranslationComplete = lastQueueComplete ||
+    sorted.find(item => item.event === 'prefetch-complete') ||
+    null
+  const lastFailure = sorted.find(item =>
+    ['translation-failed', 'queue-translation-failed', 'prefetch-failed'].includes(item.event)
+  ) || null
+  const latest = sorted[0] || null
+  const sync = syncAssessment(lastSubtitle)
+  const ranked = parseEnglishTop(lastSubtitle?.englishTop)
+  const selectedId = lastSubtitle?.englishSelectedId || 'Not available'
+  const sourceName = lastSubtitle?.sourceFilename || 'Not provided'
+  const candidateCount = Number(lastSubtitle?.englishCandidateCount || ranked.length || 0)
+  const topScore = Number(lastSubtitle?.englishSelectedScore)
+  const cacheEvent = lastDelivery || lastTranslationComplete
+  const cacheStatus = cacheEvent?.cache || 'Not seen yet'
+  const cacheTime = cacheEvent?.totalMs
+  const coldTime = lastTranslationComplete?.totalMs
+  const pipelineTime = lastTranslationComplete?.pipelineMs
+  const wallTime = lastTranslationComplete?.translationWallMs
+  const nativeConfidence = lastSubtitle?.nativeConfidence || (Number(lastSubtitle?.malayCount || 0) > 0 ? 'UNKNOWN' : 'NONE')
+  const nativeDecision = lastSubtitle?.nativeDecision || 'Not applicable'
+  const nativeId = lastSubtitle?.malaySelectedId || 'Not available'
+  const nativeScore = Number(lastSubtitle?.malaySelectedScore)
+
+  const topCandidates = ranked.length
+    ? ranked.map(item => {
+        if (item.raw) return `<div class="candidate">${escapeHtml(item.raw)}</div>`
+        const selected = String(item.id) === String(selectedId)
+        return `<div class="candidate${selected ? ' selected' : ''}"><span>#${item.rank}</span><strong>${escapeHtml(item.id)}</strong><span>score ${escapeHtml(item.score)}</span>${selected ? '<em>SELECTED</em>' : ''}</div>`
+      }).join('')
+    : '<div class="muted">No ranked English candidates recorded.</div>'
+
+  const metadataItems = [
+    ['Filename', lastSubtitle?.sourceFilenameProvided, sourceName],
+    ['Video hash', lastSubtitle?.sourceVideoHashProvided, lastSubtitle?.sourceVideoHashProvided ? 'Provided' : 'Not provided'],
+    ['Video size', lastSubtitle?.sourceVideoSizeProvided, lastSubtitle?.sourceVideoSizeProvided ? 'Provided' : 'Not provided']
+  ].map(([label, available, detail]) =>
+    `<div class="meta-row"><span>${escapeHtml(label)}</span><strong class="${available ? 'yes' : 'no'}">${available ? 'YES' : 'NO'}</strong><small>${escapeHtml(detail)}</small></div>`
+  ).join('')
+
+  let guidance = 'Run a title and refresh this page after the subtitle list appears.'
+  if (lastSubtitle) {
+    if (lastSubtitle.nativeDecision === 'dual-fallback') {
+      guidance = 'Native Malay sync evidence is weak. Try Native Malay first. Malay Auto is available as a fallback, and Gemini translation starts only if you select Malay Auto.'
+    } else if (sync.tone === 'bad') {
+      guidance = `English source sync is uncertain. Selected source ${selectedId} should be compared with a known synced OpenSubtitles track before changing Gemini settings.`
+    } else if (lastFailure) {
+      guidance = `A recent failure was recorded at ${escapeHtml(lastFailure.failureStage || lastFailure.event)}. Check the failure card and raw events.`
+    } else if (lastDelivery?.cache === 'HIT') {
+      guidance = 'Subtitle delivery is healthy and came from cache. Any timing problem is more likely source selection than translation speed.'
+    } else if (status.tone === 'good') {
+      guidance = 'Delivery looks healthy. If subtitles are out of sync, focus on the English source ID and sync confidence section.'
+    }
+  }
+
+  const rawEvents = sorted.map(item => {
     const detail = Object.entries(item)
       .filter(([key]) => !['ts', 'event'].includes(key))
-      .map(([key, value]) => `${escapeHtml(key)}=${escapeHtml(Array.isArray(value) ? value.join(',') : value)}`)
-      .join(' | ')
-    return `<tr><td>${escapeHtml(time)}</td><td>${escapeHtml(item.event)}</td><td>${detail}</td></tr>`
-  }).join('') || '<tr><td colspan="3">No request events recorded in the last 24 hours.</td></tr>'
+      .map(([key, value]) => `<span><b>${escapeHtml(key)}</b>=${escapeHtml(Array.isArray(value) ? value.join(',') : value)}</span>`)
+      .join('')
+    return `<article class="event-card"><div class="event-head"><time>${escapeHtml(formatMalaysiaTime(item.ts))}</time><code>${escapeHtml(item.event)}</code></div><div class="event-detail">${detail || '<span>No details</span>'}</div></article>`
+  }).join('') || '<p class="muted">No request events recorded in the last 24 hours.</p>'
 
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SmartSubs Diagnose</title>
-<style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101116;color:#f4f4f5;font-family:system-ui,sans-serif}.wrap{max-width:980px;margin:auto;padding:24px 14px}.card{background:#181a21;border:1px solid #30333d;border-radius:16px;padding:18px;margin-bottom:14px}.verdict{font-size:20px;font-weight:800;color:#c9ffdc;word-break:break-word}.muted{color:#aeb1bb;font-size:13px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;vertical-align:top;padding:9px;border-bottom:1px solid #30333d;word-break:break-word}th{color:#c7c9d1}.codes{display:grid;gap:5px;font-size:13px}code{color:#c9ffdc}</style></head>
-<body><main class="wrap"><section class="card"><h1>SmartSubs Diagnose</h1><div class="verdict">${escapeHtml(verdict)}</div><p class="muted">Build ${BUILD_ID} | Config ${escapeHtml(configId)} | Events kept for up to 24 hours.</p></section>
-<section class="card"><div class="codes"><div><code>NO_SUBTITLE_REQUEST_SEEN</code>: Nuvio has not requested this configured SmartSubs addon.</div><div><code>NO_ENGLISH_SOURCE_FOUND</code>: SmartSubs was requested but OpenSubtitles returned no recognised English source.</div><div><code>SUBTITLE_RETURNED_WAITING_FOR_PLAYER_SELECTION</code>: SmartSubs returned an auto Malay entry but background translation has not completed yet.</div><div><code>PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION</code>: Malay Auto is already translated and cached before player selection.</div><div><code>PREFETCH_FAILED_WAITING_FOR_PLAYER_SELECTION</code>: Background translation failed, but selecting Malay Auto can still retry normally.</div><div><code>QUEUE_PREFETCH_QUEUED</code>: Translation job is safely stored in Cloudflare Queue.</div><div><code>QUEUE_PREFETCH_TRANSLATING</code>: Queue consumer is translating before player selection.</div><div><code>QUEUE_PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION</code>: Queue translation finished and Malay VTT is cached.</div><div><code>QUEUE_PREFETCH_FAILED_WAITING_FOR_PLAYER_SELECTION</code>: Queue translation failed and may retry.</div><div><code>QUEUE_JOIN_WAITING</code>: Player selected Malay Auto while Queue translation is still running, so SmartSubs is waiting for the cached result instead of starting Gemini again.</div><div><code>TRANSLATION_DELIVERED</code>: translated VTT was successfully returned.</div><div><code>TRANSLATION_FAILED</code>: the translated VTT request reached SmartSubs but translation failed.</div></div></section>
-<section class="card"><h2>Recent events</h2><table><thead><tr><th>Time UTC</th><th>Event</th><th>Details</th></tr></thead><tbody>${rows}</tbody></table></section></main></body></html>`
+<style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101116;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif}.wrap{max-width:920px;margin:auto;padding:18px 12px 40px}.card{background:#181a21;border:1px solid #30333d;border-radius:16px;padding:16px;margin-bottom:12px}h1{font-size:24px;margin:0 0 8px}h2{font-size:17px;margin:0 0 12px}.muted{color:#aeb1bb;font-size:13px}.status{display:flex;gap:10px;align-items:flex-start}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:5px 10px;font-weight:800;font-size:12px;letter-spacing:.02em}.good{background:#123b29;color:#a7f3d0}.warn{background:#493812;color:#fde68a}.bad{background:#4a1d24;color:#fecaca}.neutral{background:#30333d;color:#e5e7eb}.status-copy{flex:1}.status-title{font-size:20px;font-weight:800;margin-bottom:4px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{background:#111319;border:1px solid #2b2e37;border-radius:12px;padding:12px}.metric .label{color:#aeb1bb;font-size:12px}.metric .value{font-size:18px;font-weight:800;margin-top:3px;word-break:break-word}.metric .sub{color:#aeb1bb;font-size:12px;margin-top:4px;word-break:break-word}.candidate{display:grid;grid-template-columns:34px 1fr auto auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid #30333d;font-size:13px}.candidate:last-child{border-bottom:0}.candidate.selected{background:#16271e}.candidate em{font-style:normal;font-size:10px;font-weight:800;color:#a7f3d0}.meta-row{display:grid;grid-template-columns:90px 42px 1fr;gap:8px;padding:8px 0;border-bottom:1px solid #30333d;align-items:start}.meta-row:last-child{border-bottom:0}.meta-row .yes{color:#a7f3d0}.meta-row .no{color:#fca5a5}.meta-row small{color:#c7c9d1;word-break:break-word}.guide{font-size:15px;line-height:1.5}.event-card{border-top:1px solid #30333d;padding:12px 0}.event-card:first-child{border-top:0}.event-head{display:flex;gap:10px;justify-content:space-between;align-items:center;margin-bottom:7px}.event-head time{font-size:12px;color:#aeb1bb}.event-head code{font-size:12px;color:#c9ffdc}.event-detail{display:flex;flex-wrap:wrap;gap:6px}.event-detail span{background:#111319;border-radius:7px;padding:4px 6px;font-size:11px;word-break:break-word}.event-detail b{color:#aeb1bb;font-weight:600}details summary{cursor:pointer;font-weight:800;padding:4px 0}code{color:#c9ffdc}@media(max-width:640px){.grid{grid-template-columns:1fr}.candidate{grid-template-columns:28px 1fr auto}.candidate em{grid-column:2}.meta-row{grid-template-columns:82px 38px 1fr}.event-head{align-items:flex-start;flex-direction:column;gap:4px}}
+</style></head>
+<body><main class="wrap">
+<section class="card"><h1>SmartSubs Diagnose</h1><div class="status"><span class="pill ${status.tone}">${escapeHtml(status.tone === 'good' ? 'OK' : status.tone === 'bad' ? 'PROBLEM' : status.tone === 'warn' ? 'CHECK' : 'INFO')}</span><div class="status-copy"><div class="status-title">${escapeHtml(status.title)}</div><div class="muted">${escapeHtml(status.explanation)}</div><div class="muted">Verdict code: <code>${escapeHtml(verdict)}</code></div></div></div><p class="muted">Malaysia time (MYT, Asia/Kuala_Lumpur) | Build ${BUILD_ID} | ${sorted.length} events retained for up to 24 hours.</p></section>
+
+<section class="card"><h2>Quick diagnosis</h2><div class="grid">
+<div class="metric"><div class="label">Latest media</div><div class="value">${escapeHtml(lastSubtitle ? `${lastSubtitle.type || ''} ${lastSubtitle.id || ''}`.trim() : 'No request')}</div><div class="sub">${escapeHtml(lastSubtitle ? formatMalaysiaTime(lastSubtitle.ts) : 'Waiting for player')}</div></div>
+<div class="metric"><div class="label">Subtitle result</div><div class="value">${escapeHtml(lastSubtitle?.result || 'Not available')}</div><div class="sub">${escapeHtml(lastSubtitle ? `${lastSubtitle.subtitleCount || 0} returned | ${lastSubtitle.languages || 'language unknown'}` : '')}</div></div>
+<div class="metric"><div class="label">Native Malay decision</div><div class="value">${escapeHtml(nativeDecision)}</div><div class="sub">source ${escapeHtml(nativeId)} | confidence ${escapeHtml(nativeConfidence)}${Number.isFinite(nativeScore) ? ` | score ${escapeHtml(nativeScore)}` : ''}</div></div>
+<div class="metric"><div class="label">Selected English source</div><div class="value">${escapeHtml(selectedId)}</div><div class="sub">${Number.isFinite(topScore) ? `score ${escapeHtml(topScore)}` : 'score unavailable'} | ${candidateCount} candidates</div></div>
+<div class="metric"><div class="label">Sync confidence</div><div class="value"><span class="pill ${sync.tone}">${escapeHtml(sync.level)}</span></div><div class="sub">${escapeHtml(sync.reason)}</div></div>
+<div class="metric"><div class="label">Latest delivery cache</div><div class="value">${escapeHtml(cacheStatus)}</div><div class="sub">${cacheTime !== undefined ? formatDuration(cacheTime) : 'No delivery timing yet'}</div></div>
+<div class="metric"><div class="label">Cold translation</div><div class="value">${coldTime !== undefined ? formatDuration(coldTime) : 'Not seen yet'}</div><div class="sub">${pipelineTime !== undefined ? `pipeline ${formatDuration(pipelineTime)}` : ''}${wallTime !== undefined ? ` | Gemini wall ${formatDuration(wallTime)}` : ''}</div></div>
+</div></section>
+
+<section class="card"><h2>What this means</h2><div class="guide">${escapeHtml(guidance)}</div></section>
+
+<section class="card"><h2>Player sync metadata</h2>${metadataItems}</section>
+
+<section class="card"><h2>English candidates</h2><p class="muted">SmartSubs selected <strong>${escapeHtml(selectedId)}</strong>. A very small score gap without hash or size means selection confidence is weak.</p>${topCandidates}</section>
+
+${lastFailure ? `<section class="card"><h2>Latest failure</h2><div class="metric"><div class="label">${escapeHtml(lastFailure.event)}</div><div class="value">${escapeHtml(lastFailure.failureStage || lastFailure.status || 'Unknown stage')}</div><div class="sub">${escapeHtml(lastFailure.error || lastFailure.reason || '')}</div></div></section>` : ''}
+
+<section class="card"><details><summary>Verdict reference</summary><p class="muted">Legacy diagnostic codes retained for compatibility and deep debugging.</p><div class="event-detail"><span><code>NO_SUBTITLE_REQUEST_SEEN</code></span><span><code>NO_ENGLISH_SOURCE_FOUND</code></span><span><code>NATIVE_MALAY_WITH_AUTO_FALLBACK</code></span><span><code>SUBTITLE_RETURNED_WAITING_FOR_PLAYER_SELECTION</code></span><span><code>PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION</code></span><span><code>PREFETCH_FAILED_WAITING_FOR_PLAYER_SELECTION</code></span><span><code>QUEUE_PREFETCH_QUEUED</code></span><span><code>QUEUE_PREFETCH_TRANSLATING</code></span><span><code>QUEUE_PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION</code></span><span><code>QUEUE_PREFETCH_FAILED_WAITING_FOR_PLAYER_SELECTION</code></span><span><code>QUEUE_JOIN_WAITING</code></span><span><code>TRANSLATION_PREPARING_IN_QUEUE</code></span><span><code>TRANSLATION_DELIVERED</code></span><span><code>TRANSLATION_FAILED</code></span></div></details></section>
+
+<section class="card"><details><summary>Raw recent events</summary><p class="muted">Shown in Malaysia time. Use this only when the summary above is not enough.</p>${rawEvents}</details></section>
+</main></body></html>`
 }
-
-
 async function prefetchTranslation(options = {}) {
   const autoUrl = String(options.autoUrl || '')
   const env = options.env || {}
@@ -358,6 +564,115 @@ function queueJoinPollMs(env) {
   return Math.max(500, Math.min(5000, Number(env.QUEUE_JOIN_POLL_MS || 1500)))
 }
 
+function playerQueueWaitMaxMs(env) {
+  return Math.max(2000, Math.min(10000, Number(env.PLAYER_QUEUE_WAIT_MAX_MS || 5000)))
+}
+
+function playerQueueGraceMs(env) {
+  return Math.max(0, Math.min(1000, Number(env.PLAYER_QUEUE_GRACE_MS || 600)))
+}
+
+function deliveryRelayTtlMs(env) {
+  return Math.max(60000, Math.min(600000, Number(env.DELIVERY_RELAY_TTL_MS || 120000)))
+}
+
+function deliveryRelayStub(env, cacheKey) {
+  if (!validTranslationCacheKey(cacheKey)) return null
+  const namespace = env.SMARTSUBS_DELIVERY
+  if (!namespace || typeof namespace.idFromName !== 'function' || typeof namespace.get !== 'function') return null
+  return namespace.get(namespace.idFromName(cacheKey))
+}
+
+async function readDeliveryRelay(env, cacheKey) {
+  try {
+    const stub = deliveryRelayStub(env, cacheKey)
+    if (!stub || typeof stub.fetch !== 'function') return null
+    const response = await stub.fetch('https://smartsubs-delivery.internal/vtt')
+    if (!response.ok) return null
+    const value = await response.text()
+    return value.startsWith('WEBVTT') ? value : null
+  } catch {
+    return null
+  }
+}
+
+async function writeDeliveryRelay(env, cacheKey, value) {
+  try {
+    const text = String(value || '')
+    const stub = deliveryRelayStub(env, cacheKey)
+    if (!stub || typeof stub.fetch !== 'function' || !text.startsWith('WEBVTT')) return false
+    const response = await stub.fetch('https://smartsubs-delivery.internal/vtt', {
+      method: 'PUT',
+      headers: { 'content-type': 'text/vtt; charset=utf-8' },
+      body: text
+    })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
+async function readReadyTranslation(env, cache, cacheKey) {
+  const cached = await cache.get(cacheKey).catch(() => null)
+  if (cached) return { vtt: cached, source: 'HIT' }
+  const relayed = await readDeliveryRelay(env, cacheKey)
+  return relayed ? { vtt: relayed, source: 'DELIVERY_RELAY' } : null
+}
+
+export class TranslationDeliveryRelay {
+  constructor(ctx, env) {
+    this.ctx = ctx
+    this.env = env
+  }
+
+  async fetch(request) {
+    if (request.method === 'PUT') {
+      const value = await request.text()
+      if (!value.startsWith('WEBVTT') || value.length > 2 * 1024 * 1024) {
+        return new Response('Invalid VTT', { status: 400 })
+      }
+      const expiresAt = Date.now() + deliveryRelayTtlMs(this.env)
+      await this.ctx.storage.put('result', { value, expiresAt })
+      await this.ctx.storage.setAlarm(expiresAt)
+      return new Response(null, { status: 204 })
+    }
+
+    if (request.method === 'GET') {
+      const result = await this.ctx.storage.get('result')
+      if (!result || typeof result.value !== 'string' || Number(result.expiresAt) <= Date.now()) {
+        if (result) await this.ctx.storage.delete('result')
+        return new Response(null, { status: 404 })
+      }
+      return new Response(result.value, {
+        status: 200,
+        headers: { 'content-type': 'text/vtt; charset=utf-8', 'cache-control': 'no-store' }
+      })
+    }
+
+    return new Response(null, { status: 405 })
+  }
+
+  async alarm() {
+    await this.ctx.storage.deleteAll()
+  }
+}
+
+function translationPreparingResponse() {
+  return send(
+    503,
+    'text/plain; charset=utf-8',
+    'Malay translation is being prepared. Retry shortly.',
+    {
+      noStore: true,
+      headers: {
+        'retry-after': '3',
+        'x-smartsubs-error': 'translation-preparing',
+        'x-smartsubs-build': BUILD_ID
+      }
+    }
+  )
+}
+
 function queueParallelEnabled(env, attempts = 1) {
   const attempt = Math.max(1, Number(attempts || 1))
   if (attempt > 1) return false
@@ -380,10 +695,20 @@ function queueFinalEnabled(env, attempts = 1) {
 }
 
 
-function queueTranslationProfile(env, attempts = 1) {
+function normaliseRequestedQueueProfile(value) {
+  const requested = String(value || '')
+  return requested === 'user-selected-stable' || requested === 'user-selected-fast'
+    ? 'user-selected-stable'
+    : ''
+}
+
+function queueTranslationProfile(env, attempts = 1, requestedProfile = '') {
+  const attempt = Math.max(1, Number(attempts || 1))
+  const requested = normaliseRequestedQueueProfile(requestedProfile)
+  if (attempt === 1 && requested === 'user-selected-stable') return 'user-selected-stable'
   if (queueFinalEnabled(env, attempts)) return 'quota-safe-final'
   if (queueParallelEnabled(env, attempts)) return 'parallel-3'
-  return Math.max(1, Number(attempts || 1)) > 1 ? 'fallback-stable' : 'm16-compatible'
+  return attempt > 1 ? 'fallback-stable' : 'm16-compatible'
 }
 
 function queueFailureStage(error) {
@@ -396,7 +721,17 @@ function queueFailureStage(error) {
   return 'unknown'
 }
 
-function queueTranslationOptions(env, attempts = 1) {
+function queueTranslationOptions(env, attempts = 1, requestedProfile = '') {
+  const retryAttempt = Math.max(1, Number(attempts || 1))
+  const requested = normaliseRequestedQueueProfile(requestedProfile)
+
+  if (retryAttempt === 1 && requested === 'user-selected-stable') {
+    return {
+      maxItems: Math.max(140, Math.min(200, Number(env.QUEUE_USER_SELECTED_CHUNK_ITEMS || 160))),
+      maxChars: Math.max(16000, Math.min(24000, Number(env.QUEUE_USER_SELECTED_CHUNK_CHARS || 20000))),
+      concurrency: Math.max(1, Math.min(3, Number(env.QUEUE_USER_SELECTED_CONCURRENCY || 3)))
+    }
+  }
   if (queueFinalEnabled(env, attempts)) {
     return {
       maxItems: Math.max(160, Math.min(220, Number(env.QUEUE_FINAL_CHUNK_ITEMS || 180))),
@@ -413,7 +748,6 @@ function queueTranslationOptions(env, attempts = 1) {
     }
   }
 
-  const retryAttempt = Math.max(1, Number(attempts || 1))
   if (retryAttempt > 1) {
     return {
       maxItems: Math.max(120, Math.min(240, Number(env.QUEUE_FALLBACK_CHUNK_ITEMS || 180))),
@@ -502,14 +836,17 @@ async function waitForQueueCache(options = {}) {
     await sleepFn(waitMs)
     polls++
 
-    const cached = await cache.get(cacheKey).catch(() => null)
-    if (cached) {
+    const ready = await readReadyTranslation(env, cache, cacheKey)
+    if (ready) {
       return {
-        vtt: cached,
+        vtt: ready.vtt,
         waitMs: Math.max(0, nowFn() - startedAt),
         polls,
         jobStatus: String(job?.state || 'unknown'),
-        outcome: 'hit'
+        outcome: 'hit',
+        cacheSource: ready.source,
+        graceWaitMs: 0,
+        graceHit: false
       }
     }
 
@@ -519,14 +856,48 @@ async function waitForQueueCache(options = {}) {
     }
   }
 
-  const finalCached = await cache.get(cacheKey).catch(() => null)
-  if (finalCached) {
+  const finalReady = await readReadyTranslation(env, cache, cacheKey)
+  if (finalReady) {
     return {
-      vtt: finalCached,
+      vtt: finalReady.vtt,
       waitMs: Math.max(0, nowFn() - startedAt),
       polls,
       jobStatus: String(job?.state || 'unknown'),
-      outcome: 'hit'
+      outcome: 'hit',
+      cacheSource: finalReady.source,
+      graceWaitMs: 0,
+      graceHit: false
+    }
+  }
+
+  const graceMs = Math.max(0, Math.min(1000, Number(options.graceMs || 0)))
+  if (graceMs > 0 && queueJobActive(job)) {
+    const graceStartedAt = nowFn()
+    await sleepFn(graceMs)
+    const graceReady = await readReadyTranslation(env, cache, cacheKey)
+    const graceWaitMs = Math.max(0, nowFn() - graceStartedAt)
+
+    if (graceReady) {
+      return {
+        vtt: graceReady.vtt,
+        waitMs: Math.max(0, nowFn() - startedAt),
+        polls,
+        jobStatus: String(job?.state || 'unknown'),
+        outcome: 'hit',
+        cacheSource: graceReady.source,
+        graceWaitMs,
+        graceHit: true
+      }
+    }
+
+    return {
+      vtt: null,
+      waitMs: Math.max(0, nowFn() - startedAt),
+      polls,
+      jobStatus: String(job?.state || 'missing'),
+      outcome: job && job.state === 'failed' ? 'failed' : 'timeout',
+      graceWaitMs,
+      graceHit: false
     }
   }
 
@@ -535,7 +906,9 @@ async function waitForQueueCache(options = {}) {
     waitMs: Math.max(0, nowFn() - startedAt),
     polls,
     jobStatus: String(job?.state || 'missing'),
-    outcome: job && job.state === 'failed' ? 'failed' : 'timeout'
+    outcome: job && job.state === 'failed' ? 'failed' : 'timeout',
+    graceWaitMs: 0,
+    graceHit: false
   }
 }
 
@@ -558,6 +931,7 @@ async function enqueuePrefetchTranslation(options = {}) {
   const diagnosticFn = options.diagnosticFn || recordDiagnostic
   const translationToken = parseAutoTranslationToken(autoUrl)
   const cacheKey = String(options.cacheKey || '')
+  const requestedProfile = normaliseRequestedQueueProfile(options.queueProfile)
 
   if (!translationToken || !configToken || !configId) return false
 
@@ -607,12 +981,14 @@ async function enqueuePrefetchTranslation(options = {}) {
       translationToken,
       configId,
       cacheKey: validTranslationCacheKey(cacheKey) ? cacheKey : '',
+      profile: requestedProfile,
       queuedAt: Date.now()
     })
 
     await diagnosticFn(env.SMARTSUBS_CACHE, configId, {
       event: 'queue-enqueued',
-      status: 'queued'
+      status: 'queued',
+      profile: requestedProfile || 'background-default'
     }).catch(() => {})
     return true
   } catch (error) {
@@ -643,8 +1019,9 @@ async function processQueueMessage(body, env, options = {}) {
   const epochNowFn = typeof options.epochNowFn === 'function' ? options.epochNowFn : Date.now
   const queuedAt = Number(payload.queuedAt || 0)
   const queueDelayMs = queuedAt > 0 ? Math.max(0, roundMs(epochNowFn() - queuedAt)) : 0
-  const queueProfile = queueTranslationOptions(env, attempts)
-  const queueProfileName = queueTranslationProfile(env, attempts)
+  const requestedProfile = normaliseRequestedQueueProfile(payload.profile)
+  const queueProfile = queueTranslationOptions(env, attempts, requestedProfile)
+  const queueProfileName = queueTranslationProfile(env, attempts, requestedProfile)
 
   if (!secret) throw new Error('SmartSubs server secret is not configured')
   if (payload.v !== 1 || !configToken || !translationToken || !configId) {
@@ -696,6 +1073,8 @@ async function processQueueMessage(body, env, options = {}) {
       translateOptions: queueProfile
     })
 
+    const deliveryRelayStored = await writeDeliveryRelay(env, cacheKey, result.vtt)
+
     await writeQueueJobState(env, cacheKey, {
       state: 'ready',
       configId,
@@ -729,6 +1108,7 @@ async function processQueueMessage(body, env, options = {}) {
       chunkChars: repair.chunkChars,
       concurrency: repair.concurrency,
       queueDelayMs,
+      delivery: deliveryRelayStored ? 'relay-stored' : 'kv-only',
       sourceFetchMs: repair.sourceFetchMs,
       parseMs: repair.parseMs,
       sourceBytes: repair.sourceBytes,
@@ -845,6 +1225,10 @@ async function handleQueue(batch, env, options = {}) {
     }
   }
 }
+function shouldPrefetchAutoResult(result, autoUrl) {
+  return Boolean(autoUrl) && result?.autoPrefetch !== false
+}
+
 async function configuredRequest(request, env, token, suffix, executionCtx = null) {
   const secret = serverSecret(env)
   if (!secret) return send(503, 'text/plain; charset=utf-8', 'SmartSubs server secret is not configured', { noStore: true })
@@ -890,21 +1274,22 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
       const cacheKey = translationCacheKey(tokenData, userConfig.model, env)
       let joinWaitMs = 0
       let joinPolls = 0
+      let joinGraceMs = 0
+      let joinGraceHit = false
       let joinStatus = ''
       let result = null
 
-      const cached = await cache.get(cacheKey).catch(() => null)
-      if (cached) {
+      const ready = await readReadyTranslation(env, cache, cacheKey)
+      if (ready) {
         result = {
-          vtt: cached,
+          vtt: ready.vtt,
           cacheKey,
-          status: 'HIT',
+          status: ready.source,
           translationStats: null
         }
-        joinStatus = 'cache-hit'
+        joinStatus = ready.source === 'DELIVERY_RELAY' ? 'delivery-relay-hit' : 'cache-hit'
       } else {
         const job = await readQueueJobState(env, cacheKey)
-
         if (queueJobActive(job)) {
           await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
             event: 'queue-join-start',
@@ -915,56 +1300,134 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
             env,
             cache,
             cacheKey,
-            initialJob: job
+            initialJob: job,
+            maxWaitMs: playerQueueWaitMaxMs(env),
+            graceMs: playerQueueGraceMs(env)
           })
 
           joinWaitMs = joined.waitMs
           joinPolls = joined.polls
-          joinStatus = joined.outcome
+          joinGraceMs = Number(joined.graceWaitMs || 0)
+          joinGraceHit = joined.graceHit === true
+          joinStatus = joined.graceHit ? 'queue-join-grace-hit' : joined.outcome
 
           if (joined.vtt) {
             result = {
               vtt: joined.vtt,
               cacheKey,
-              status: 'QUEUE_JOIN',
+              status: joined.cacheSource === 'DELIVERY_RELAY' ? 'DELIVERY_RELAY' : 'QUEUE_JOIN',
               translationStats: null
             }
-
             await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
               event: 'queue-join-hit',
               status: joined.jobStatus,
               waitMs: joinWaitMs,
-              polls: joinPolls
+              polls: joinPolls,
+              graceMs: joinGraceMs,
+              graceHit: joinGraceHit
             }).catch(() => {})
-          } else {
+            if (joinGraceHit) {
+              await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+                event: 'queue-grace-hit',
+                status: joined.jobStatus,
+                waitMs: joinWaitMs,
+                graceMs: joinGraceMs
+              }).catch(() => {})
+            }
+          } else if (joined.outcome !== 'failed') {
             await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
-              event: joined.outcome === 'failed' ? 'queue-join-fallback' : 'queue-join-timeout',
+              event: 'translation-pending',
               status: joined.jobStatus,
               waitMs: joinWaitMs,
               polls: joinPolls,
+              graceMs: joinGraceMs,
+              graceHit: joinGraceHit,
               reason: joined.outcome
             }).catch(() => {})
+
+            return translationPreparingResponse()
           }
         }
       }
 
       if (!result) {
-        if (!joinStatus) joinStatus = 'direct'
-
         if (!await rateLimitAllowed(env.SMARTSUBS_GENERATE_LIMITER, `generate:${configId}`)) {
           return rateLimitedResponse('translation generation')
         }
 
-        result = await cfGetOrTranslate({
-          cache,
-          upstreamUrl: tokenData.url,
-          sourceId: tokenData.cacheId,
-          model: userConfig.model,
-          apiKey: userConfig.apiKey,
-          cacheVersion: cacheVersion(env)
+        const queued = await enqueuePrefetchTranslation({
+          autoUrl: request.url,
+          env,
+          configToken: token,
+          configId,
+          cacheKey,
+          queueProfile: 'user-selected-stable'
         })
-      }
 
+        if (queued) {
+          await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+            event: 'player-translation-queued',
+            status: 'queued'
+          }).catch(() => {})
+
+          const joined = await waitForQueueCache({
+            env,
+            cache,
+            cacheKey,
+            maxWaitMs: playerQueueWaitMaxMs(env),
+            graceMs: playerQueueGraceMs(env)
+          })
+
+          joinWaitMs = joined.waitMs
+          joinPolls = joined.polls
+          joinGraceMs = Number(joined.graceWaitMs || 0)
+          joinGraceHit = joined.graceHit === true
+          joinStatus = joined.outcome === 'hit'
+            ? (joined.graceHit ? 'player-queue-grace-hit' : 'player-queue-hit')
+            : `player-queue-${joined.outcome}`
+
+          if (joined.vtt) {
+            if (joinGraceHit) {
+              await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+                event: 'queue-grace-hit',
+                status: joined.jobStatus || 'queued',
+                waitMs: joinWaitMs,
+                graceMs: joinGraceMs
+              }).catch(() => {})
+            }
+            result = {
+              vtt: joined.vtt,
+              cacheKey,
+              status: joined.cacheSource === 'DELIVERY_RELAY' ? 'DELIVERY_RELAY' : 'QUEUE_JOIN',
+              translationStats: null
+            }
+          } else if (joined.outcome !== 'failed') {
+            await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+              event: 'translation-pending',
+              status: joined.jobStatus || 'queued',
+              waitMs: joinWaitMs,
+              polls: joinPolls,
+              graceMs: joinGraceMs,
+              graceHit: joinGraceHit,
+              reason: joined.outcome
+            }).catch(() => {})
+
+            return translationPreparingResponse()
+          }
+        }
+
+        if (!result) {
+          joinStatus = joinStatus || 'direct-fallback'
+          result = await cfGetOrTranslate({
+            cache,
+            upstreamUrl: tokenData.url,
+            sourceId: tokenData.cacheId,
+            model: userConfig.model,
+            apiKey: userConfig.apiKey,
+            cacheVersion: cacheVersion(env)
+          })
+        }
+      }
       const totalMs = roundMs(nowMs() - startedAt)
       logPerf({
         milestone: 'M20R2',
@@ -982,6 +1445,8 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
         totalMs,
         waitMs: joinWaitMs,
         polls: joinPolls,
+        graceMs: joinGraceMs,
+        graceHit: joinGraceHit,
         joinStatus,
         expected: repair.expected,
         received: repair.received,
@@ -1052,6 +1517,8 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
       const result = await handleSubtitles(args, {
         apiKey: userConfig.apiKey,
         model: userConfig.model,
+        includeEnglishTracks: true,
+        englishTrackLimit: 5,
         publicBaseUrl: configuredBase(request, token),
         tokenSecret: secret,
         onDiagnostic: event => recordDiagnostic(env.SMARTSUBS_CACHE, configId, event)
@@ -1061,7 +1528,15 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
         item && item.lang === 'msa' && typeof item.url === 'string' && item.url.includes('/translated/')
       )?.url
 
-      if (autoUrl) {
+      if (autoUrl && result?.autoPrefetch === false) {
+        await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+          event: 'auto-prefetch-skipped',
+          status: 'quota-protected',
+          reason: result.autoPrefetchReason || 'user-selection-required'
+        }).catch(() => {})
+      }
+
+      if (shouldPrefetchAutoResult(result, autoUrl)) {
         const translationToken = parseAutoTranslationToken(autoUrl)
         let autoCacheKey = ''
 
@@ -1160,6 +1635,7 @@ async function handleRequest(request, env, executionCtx = null) {
         secretReady: true,
         model: geminiModel(env),
         manifestUrl: urls.manifestUrl,
+        diagnoseUrl: `${urls.configuredBaseUrl}/diagnose`,
         installUrl: urls.installUrl,
       }), { noStore: true, csp: true })
     } catch (error) {
@@ -1219,4 +1695,4 @@ export default {
   }
 }
 
-export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady }
+export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, normaliseRequestedQueueProfile, queueTranslationProfile, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady, shouldPrefetchAutoResult, playerQueueWaitMaxMs, playerQueueGraceMs, deliveryRelayTtlMs, readDeliveryRelay, writeDeliveryRelay, readReadyTranslation, translationPreparingResponse }
