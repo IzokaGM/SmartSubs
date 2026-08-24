@@ -5,14 +5,18 @@ const assert = require('node:assert/strict')
 
 const { buildIndexedPrompt } = require('../src/translator')
 
-test('Part 4.5 requests natural Malaysian Malay with explicit locale controls', () => {
+test('Part 4.5 requests professionally edited TV subtitle style with locale controls', () => {
   const prompt = buildIndexedPrompt([{ id: 0, text: 'Are you kidding me?' }])
 
   assert.match(prompt, /Malaysian Bahasa Melayu/)
-  assert.match(prompt, /Avoid unintended Indonesian vocabulary/)
+  assert.match(prompt, /professionally edited television and streaming subtitles/)
+  assert.match(prompt, /clear, neutral spoken Malay/)
+  assert.match(prompt, /not dubbed dialogue, a novel, social-media slang or a literal transcript/)
+  assert.match(prompt, /Avoid unintended Indonesian usage/)
   assert.match(prompt, /saya, awak, anda, aku, kau, kami and kita/)
   assert.match(prompt, /without censoring or exaggerating/)
-  assert.match(prompt, /concise and comfortable to read as subtitles/)
+  assert.match(prompt, /Never add lah, kan, weh/)
+  assert.match(prompt, /no more than two lines per cue and roughly 42 characters per line/)
 })
 
 test('Part 4.5 preserves structured cue ids and appends the input JSON unchanged', () => {

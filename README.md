@@ -32,7 +32,7 @@ This repository was reconstructed from the supplied SmartSubs GitHub Actions rec
 - Translation output: WebVTT
 - Built-in English tracks: up to 5
 - Delivery Relay TTL: 120 seconds
-- Gemini prompt: concise Malaysian Bahasa Melayu
+- Gemini prompt: natural, professionally edited Malaysian TV subtitle style
 
 ## Required Cloudflare bindings
 

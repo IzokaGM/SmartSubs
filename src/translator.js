@@ -234,14 +234,16 @@ async function requestGemini(prompt, options = {}) {
 }
 function buildIndexedPrompt(items) {
   return [
-    'Translate these English subtitle cues into natural, concise Malaysian Bahasa Melayu for film and television viewers.',
-    'Use contemporary Malaysian vocabulary and expressions. Avoid unintended Indonesian vocabulary or sentence structures unless the dialogue specifically refers to Indonesia or an Indonesian character.',
-    'Use surrounding cues as context. Keep pronouns, relationships, tone, humour, slang, recurring terminology and character voices consistent across the batch.',
-    'Translate the intended meaning, emotion and level of formality instead of translating word for word. Preserve the original intensity of insults, profanity, threats and emotional dialogue without censoring or exaggerating them.',
-    'Choose pronouns such as saya, awak, anda, aku, kau, kami and kita according to the relationship, setting and tone. Do not insert particles such as lah, kan or weh unless the original tone supports them.',
-    'Keep translations concise and comfortable to read as subtitles. Do not unnecessarily expand short dialogue. Preserve line breaks where practical and avoid creating more lines than the source cue.',
+    'Translate these English cues into natural Malaysian Bahasa Melayu written in the style of professionally edited television and streaming subtitles.',
+    'Use clear, neutral spoken Malay. The result must read like subtitles, not dubbed dialogue, a novel, social-media slang or a literal transcript. Avoid awkward, flowery, overly formal or try-hard phrasing.',
+    'Use Malaysian vocabulary and sentence structure. Avoid unintended Indonesian usage unless the story or character specifically calls for it.',
+    'Use surrounding cues as context. Keep relationships, tone, humour, recurring terms and each character voice consistent across the batch.',
+    'Translate the intended meaning and emotional force, not each word. Restructure naturally when needed, but do not invent meaning. Preserve the intensity of insults, profanity and threats without censoring or exaggerating them.',
+    'Choose saya, awak, anda, aku, kau, kami and kita from context. Use contractions such as tak or nak only when they fit the character and scene. Never add lah, kan, weh or other local flavour merely to make the dialogue sound Malaysian.',
+    'Be economical. Remove redundant wording when the same meaning remains clear. Keep short dialogue short and immediately readable. Prefer no more than two lines per cue and roughly 42 characters per line where practical, without splitting names or phrases unnaturally.',
+    'Preserve source line breaks when they already read well. Otherwise, place line breaks at natural phrase boundaries. Do not create more lines than necessary.',
     'Keep character names, place names, brand names, numbers, speaker markers, musical symbols, HTML tags and ASS-style formatting tags intact where appropriate. Translate meaningful sound descriptions and on-screen text when intended for the viewer.',
-    'Do not add explanations, translator notes, censorship, invented context or extra dialogue.',
+    'Do not add explanations, translator notes, censorship, invented context, extra dialogue or decorative slang.',
     'Every input object has a numeric id. Return exactly one translated object with the SAME id for every input cue.',
     'Never renumber, merge, split, duplicate or omit ids.',
     '',
