@@ -1,0 +1,68 @@
+name: Update Gemini TV subtitle prompt
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: smartsubs-tv-subtitle-prompt
+  cancel-in-progress: false
+
+jobs:
+  update-prompt:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Update Gemini translation prompt
+        shell: python
+        run: |
+          from pathlib import Path
+
+          translator = Path("src/translator.js")
+          content = translator.read_text(encoding="utf-8")
+          start = content.index("function buildIndexedPrompt(items) {")
+          end = content.index("\nfunction parseIndexedTranslations", start)
+          replacement = "function buildIndexedPrompt(items) {\n  return [\n    'Translate these English subtitles into natural Malaysian Bahasa Melayu, following professional TV and streaming subtitle style.',\n    'Use concise, fluent, conversational Malay. Avoid literal translation, stiff or overly formal language, unintended Indonesian phrasing and unnecessary local slang.',\n    'Preserve meaning, tone, emotion and character relationships. Adapt expressions naturally without adding, omitting or softening important meaning.',\n    'Keep dialogue short and easy to read. Choose pronouns and vocabulary from context; stay consistent across related cues.',\n    'Preserve names, numbers, speaker markers and formatting tags. Use natural line breaks and no more than two lines per cue where practical.',\n    'Return exactly one translated object for each input id, preserving all ids and their original order. Do not merge, split, omit or add cues. Output only the required JSON.',\n    '',\n    JSON.stringify(items)\n  ].join('\\n')\n}\n"
+          translator.write_text(content[:start] + replacement + content[end:], encoding="utf-8")
+
+          tests = Path("test/v2-part4-5-malaysian-prompt.test.js")
+          tests.write_text("'use strict'\n\nconst test = require('node:test')\nconst assert = require('node:assert/strict')\n\nconst { buildIndexedPrompt } = require('../src/translator')\n\ntest('Part 4.5 requests concise, professional Malaysian TV subtitle style', () => {\n  const prompt = buildIndexedPrompt([{ id: 0, text: 'Are you kidding me?' }])\n  assert.match(prompt, /natural Malaysian Bahasa Melayu/)\n  assert.match(prompt, /professional TV and streaming subtitle style/)\n  assert.match(prompt, /concise, fluent, conversational Malay/)\n  assert.match(prompt, /unintended Indonesian phrasing/)\n  assert.match(prompt, /Preserve meaning, tone, emotion and character relationships/)\n  assert.match(prompt, /Choose pronouns and vocabulary from context/)\n  assert.match(prompt, /no more than two lines per cue where practical/)\n  assert.match(prompt, /speaker markers and formatting tags/)\n})\n\ntest('Part 4.5 preserves structured cue ids and appends the input JSON unchanged', () => {\n  const items = [\n    { id: 17, text: 'Hello, <i>John</i>.' },\n    { id: 23, text: '[door closes]\\nWait!' }\n  ]\n  const prompt = buildIndexedPrompt(items)\n  const payload = JSON.parse(prompt.slice(prompt.lastIndexOf('\\n') + 1))\n  assert.deepEqual(payload, items)\n  assert.match(prompt, /exactly one translated object for each input id/)\n  assert.match(prompt, /preserving all ids and their original order/)\n  assert.match(prompt, /Do not merge, split, omit or add cues/)\n})\n\ntest('Part 4.5 keeps the fixed prompt instructions compact', () => {\n  const promptWithoutCues = buildIndexedPrompt([])\n  assert.ok(promptWithoutCues.length < 1100)\n})\n", encoding="utf-8")
+
+          readme = Path("README.md")
+          readme_text = readme.read_text(encoding="utf-8")
+          readme_text = readme_text.replace("- Gemini prompt: concise Malaysian Bahasa Melayu", "- Gemini prompt: concise, professional Malaysian TV subtitle style")
+          readme_text = readme_text.replace("- Gemini prompt: natural, professionally edited Malaysian TV subtitle style", "- Gemini prompt: concise, professional Malaysian TV subtitle style")
+          readme.write_text(readme_text, encoding="utf-8")
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run checks and tests
+        run: |
+          npm run check
+          npm test
+
+      - name: Commit and push to main
+        run: |
+          if git diff --quiet; then
+            echo "No changes needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md src/translator.js test/v2-part4-5-malaysian-prompt.test.js
+          git commit -m "Optimize Gemini prompt for concise TV subtitle style"
+          git push origin HEAD:main
