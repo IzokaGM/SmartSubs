@@ -234,18 +234,12 @@ async function requestGemini(prompt, options = {}) {
 }
 function buildIndexedPrompt(items) {
   return [
-    'Translate these English cues into natural Malaysian Bahasa Melayu written in the style of professionally edited television and streaming subtitles.',
-    'Use clear, neutral spoken Malay. The result must read like subtitles, not dubbed dialogue, a novel, social-media slang or a literal transcript. Avoid awkward, flowery, overly formal or try-hard phrasing.',
-    'Use Malaysian vocabulary and sentence structure. Avoid unintended Indonesian usage unless the story or character specifically calls for it.',
-    'Use surrounding cues as context. Keep relationships, tone, humour, recurring terms and each character voice consistent across the batch.',
-    'Translate the intended meaning and emotional force, not each word. Restructure naturally when needed, but do not invent meaning. Preserve the intensity of insults, profanity and threats without censoring or exaggerating them.',
-    'Choose saya, awak, anda, aku, kau, kami and kita from context. Use contractions such as tak or nak only when they fit the character and scene. Never add lah, kan, weh or other local flavour merely to make the dialogue sound Malaysian.',
-    'Be economical. Remove redundant wording when the same meaning remains clear. Keep short dialogue short and immediately readable. Prefer no more than two lines per cue and roughly 42 characters per line where practical, without splitting names or phrases unnaturally.',
-    'Preserve source line breaks when they already read well. Otherwise, place line breaks at natural phrase boundaries. Do not create more lines than necessary.',
-    'Keep character names, place names, brand names, numbers, speaker markers, musical symbols, HTML tags and ASS-style formatting tags intact where appropriate. Translate meaningful sound descriptions and on-screen text when intended for the viewer.',
-    'Do not add explanations, translator notes, censorship, invented context, extra dialogue or decorative slang.',
-    'Every input object has a numeric id. Return exactly one translated object with the SAME id for every input cue.',
-    'Never renumber, merge, split, duplicate or omit ids.',
+    'Translate these English subtitles into natural Malaysian Bahasa Melayu, following professional TV and streaming subtitle style.',
+    'Use concise, fluent, conversational Malay. Avoid literal translation, stiff or overly formal language, unintended Indonesian phrasing and unnecessary local slang.',
+    'Preserve meaning, tone, emotion and character relationships. Adapt expressions naturally without adding, omitting or softening important meaning.',
+    'Keep dialogue short and easy to read. Choose pronouns and vocabulary from context; stay consistent across related cues.',
+    'Preserve names, numbers, speaker markers and formatting tags. Use natural line breaks and no more than two lines per cue where practical.',
+    'Return exactly one translated object for each input id, preserving all ids and their original order. Do not merge, split, omit or add cues. Output only the required JSON.',
     '',
     JSON.stringify(items)
   ].join('\n')
