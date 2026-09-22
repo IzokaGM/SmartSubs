@@ -1,0 +1,82 @@
+name: SmartSubs - Auto Apply KV Patch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - SmartSubs_KV_Monitor_Patch.zip
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: smartsubs-kv-patch-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply-test-and-cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout patch ZIP
+        uses: actions/checkout@v4
+
+      - name: Validate and extract monitor patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from zipfile import ZipFile
+          from pathlib import Path, PurePosixPath
+          import stat
+          name = Path('SmartSubs_KV_Monitor_Patch.zip')
+          if not name.is_file():
+              raise SystemExit('SmartSubs_KV_Monitor_Patch.zip not found in repo root')
+          expected = {
+              'KV_MONITOR_README.md',
+              'package.json',
+              'src/cloudflare-worker.mjs',
+              'src/kv-monitor.mjs',
+              'src/kv-usage.mjs',
+              'test/kv-monitor.test.js',
+          }
+          with ZipFile(name) as archive:
+              members = archive.infolist()
+              if len(members) != len(expected) or {m.filename for m in members} != expected:
+                  raise SystemExit('ZIP contents do not match expected monitor patch')
+              for member in members:
+                  path = PurePosixPath(member.filename)
+                  mode = member.external_attr >> 16
+                  if (path.is_absolute() or '..' in path.parts or '\\' in member.filename
+                          or member.is_dir() or stat.S_ISLNK(mode)):
+                      raise SystemExit('Unsafe ZIP entry: ' + member.filename)
+              for member in members:
+                  target = Path(member.filename)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(archive.read(member))
+                  print('Applied', member.filename)
+          PY
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Check syntax
+        run: npm run check
+
+      - name: Run regression tests
+        run: npm test
+
+      - name: Commit extracted code and remove ZIP after checks pass
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- KV_MONITOR_README.md package.json src/cloudflare-worker.mjs src/kv-monitor.mjs src/kv-usage.mjs test/kv-monitor.test.js
+          git rm -- SmartSubs_KV_Monitor_Patch.zip
+          git commit -m 'Apply SmartSubs KV Monitor patch (checks passed)'
+          git push origin HEAD:main
