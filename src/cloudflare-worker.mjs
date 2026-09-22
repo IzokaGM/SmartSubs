@@ -8,7 +8,7 @@ import perfModule from './perf.js'
 import diagnosticsModule from './diagnostics.js'
 import { CloudflareTranslationCache, cfGetOrTranslate, makeCacheKey } from './cf-cache.mjs'
 import { createKvUsageTracker, trackedEnvironment } from './kv-usage.mjs'
-import { monitorStub, publishKvUsage, storeMonitorReport, readMonitorReports, pruneMonitorReports, renderKvMonitor } from './kv-monitor.mjs'
+import { monitorStub, publishKvUsage, storeMonitorReport, readMonitorReports, readMonitorTests, controlMonitorTest, pruneMonitorReports, renderKvMonitor } from './kv-monitor.mjs'
 
 const { createConfiguredManifest } = configuredManifestModule
 const { handleSubtitles } = subtitlesModule
@@ -652,8 +652,24 @@ export class TranslationDeliveryRelay {
       }
       return new Response(null, { status: saved ? 204 : 400 })
     }
+    if (/^\/usage\/session\/(start|stop|reset)$/.test(path) && request.method === 'POST') {
+      let payload
+      try { payload = await request.json() } catch { return new Response(null, { status: 400 }) }
+      const action = path.split('/').at(-1)
+      const result = await controlMonitorTest(this.ctx.storage, action, payload?.media)
+      if (result.status === 204 && !(await this.ctx.storage.getAlarm())) {
+        await this.ctx.storage.setAlarm(Date.now() + 86400000)
+      }
+      return result.status === 204
+        ? new Response(null, { status: 204 })
+        : new Response(JSON.stringify({ code: result.code }), { status: result.status,
+            headers: { 'content-type': 'application/json; charset=utf-8' } })
+    }
     if (path === '/usage' && request.method === 'GET') {
-      return new Response(JSON.stringify(await readMonitorReports(this.ctx.storage)), {
+      const withTests = new URL(request.url).searchParams.get('tests') === '1'
+      const reports = await readMonitorReports(this.ctx.storage)
+      const payload = withTests ? { reports, tests: await readMonitorTests(this.ctx.storage) } : reports
+      return new Response(JSON.stringify(payload), {
         headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
       })
     }
@@ -1302,14 +1318,43 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
     })
   }
 
+  if (request.method === 'POST' && /^\/kv-monitor\/session\/(start|stop|reset)$/.test(suffix)) {
+    const stub = monitorStub(env, configId)
+    if (!stub) return send(503, 'text/plain; charset=utf-8', 'KV Monitor is unavailable', { noStore: true })
+    const action = suffix.split('/').at(-1)
+    let outcome = 'error'
+    try {
+      const form = await request.formData()
+      const type = String(form.get('type') || '')
+      const id = String(form.get('id') || '')
+      if (action === 'reset' && form.get('confirm') !== 'RESET') outcome = 'invalid'
+      else {
+        const reply = await stub.fetch(`https://smartsubs-monitor.internal/usage/session/${action}`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ media: { type, id } })
+        })
+        if (reply.status === 204) outcome = ({ start: 'started', stop: 'stopped', reset: 'reset' })[action]
+        else {
+          const data = await reply.json()
+          outcome = ['active', 'invalid', 'missing'].includes(data.code) ? data.code : 'error'
+        }
+      }
+    } catch { outcome = 'error' }
+    const url = new URL(request.url)
+    url.pathname = url.pathname.replace(/\/session\/(start|stop|reset)$/, '')
+    url.search = `?notice=${encodeURIComponent(outcome)}`
+    url.hash = ''
+    return new Response(null, { status: 303, headers: { location: url.toString(), 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } })
+  }
+
   if (request.method === 'GET' && suffix === '/kv-monitor') {
     const stub = monitorStub(env, configId)
     if (!stub) return send(503, 'text/plain; charset=utf-8', 'KV Monitor requires SMARTSUBS_DELIVERY Durable Object binding', { noStore: true })
     try {
-      const response = await stub.fetch('https://smartsubs-monitor.internal/usage')
+      const response = await stub.fetch('https://smartsubs-monitor.internal/usage?tests=1')
       if (!response.ok) throw new Error('Monitor not ready')
-      const reports = await response.json()
-      return send(200, 'text/html; charset=utf-8', renderKvMonitor(reports), {
+      const { reports, tests } = await response.json()
+      const notice = new URL(request.url).searchParams.get('notice') || ''
+      return send(200, 'text/html; charset=utf-8', renderKvMonitor(reports, tests, notice), {
         noStore: true, csp: true,
         headers: { 'referrer-policy': 'no-referrer', 'x-robots-tag': 'noindex, nofollow' }
       })
