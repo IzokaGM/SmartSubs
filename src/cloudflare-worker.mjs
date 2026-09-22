@@ -7,6 +7,7 @@ import configureModule from './configure.js'
 import perfModule from './perf.js'
 import diagnosticsModule from './diagnostics.js'
 import { CloudflareTranslationCache, cfGetOrTranslate, makeCacheKey } from './cf-cache.mjs'
+import { createKvUsageTracker, trackedEnvironment } from './kv-usage.mjs'
 
 const { createConfiguredManifest } = configuredManifestModule
 const { handleSubtitles } = subtitlesModule
@@ -167,16 +168,29 @@ function getCache(env) {
       version: cacheVersion(env)
     })
   }
-  let cache = caches.get(binding)
+  // A tracked request gets its own KV wrapper but shares the original isolate's
+  // LRU memory and counters. Tracking must not silently disable memory caching.
+  const original = env.__kvUsageOriginal || binding
+  let cache = caches.get(original)
   if (!cache) {
     cache = new CloudflareTranslationCache({
-      kv: binding,
+      kv: original,
       ttlMs: cacheTtlMs(env),
       version: cacheVersion(env)
     })
-    caches.set(binding, cache)
+    caches.set(original, cache)
   }
-  return cache
+  if (!env.__kvUsageTracker) return cache
+  if (!env.__kvUsageTracker.cache) {
+    env.__kvUsageTracker.cache = new CloudflareTranslationCache({
+      kv: binding,
+      ttlMs: cacheTtlMs(env),
+      version: cacheVersion(env),
+      memory: cache.memory,
+      counters: cache.counters
+    })
+  }
+  return env.__kvUsageTracker.cache
 }
 
 function parseSubtitleArgs(pathname) {
@@ -1036,6 +1050,7 @@ async function processQueueMessage(body, env, options = {}) {
   try {
     userConfig = decodeUserConfigToken(configToken, { secret })
     const tokenData = decodeTranslationTokenData(translationToken, secret)
+    env.__kvUsageTracker?.setMedia(tokenData.media)
     const expectedCacheKey = translationCacheKey(tokenData, userConfig.model, env)
     const suppliedCacheKey = String(payload.cacheKey || '')
 
@@ -1073,6 +1088,7 @@ async function processQueueMessage(body, env, options = {}) {
       translateOptions: queueProfile
     })
 
+    env.__kvUsageTracker?.setCacheResult(result.status)
     const deliveryRelayStored = await writeDeliveryRelay(env, cacheKey, result.vtt)
 
     await writeQueueJobState(env, cacheKey, {
@@ -1174,8 +1190,10 @@ async function handleQueue(batch, env, options = {}) {
   const processFn = options.processFn || processQueueMessage
 
   for (const message of batch?.messages || []) {
+    const tracker = options.trackUsage ? createKvUsageTracker({ phase: 'queue', attempt: message.attempts }) : null
+    const messageEnv = tracker ? trackedEnvironment(env, tracker) : env
     try {
-      await processFn(message.body, env, {
+      await processFn(message.body, messageEnv, {
         attempts: message.attempts
       })
       if (typeof message.ack === 'function') message.ack()
@@ -1187,13 +1205,13 @@ async function handleQueue(batch, env, options = {}) {
 
       if (permanent) {
         if (validTranslationCacheKey(cacheKey)) {
-          await writeQueueJobState(env, cacheKey, {
+          await writeQueueJobState(messageEnv, cacheKey, {
             state: 'failed',
             configId,
             attempts: message.attempts
           }).catch(() => {})
         }
-        await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+        await recordDiagnostic(messageEnv.SMARTSUBS_CACHE, configId, {
           event: 'queue-retry-stopped',
           status: 'permanent',
           attempts: message.attempts,
@@ -1204,14 +1222,14 @@ async function handleQueue(batch, env, options = {}) {
       } else if (typeof message.retry === 'function') {
         const attempts = Math.max(1, Number(message.attempts || 1))
         if (validTranslationCacheKey(cacheKey)) {
-          await writeQueueJobState(env, cacheKey, {
+          await writeQueueJobState(messageEnv, cacheKey, {
             state: 'retrying',
             configId,
             attempts
           }).catch(() => {})
         }
         const retryDelaySeconds = Math.min(60, attempts * 10)
-        await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+        await recordDiagnostic(messageEnv.SMARTSUBS_CACHE, configId, {
           event: 'queue-retry-scheduled',
           status: 'retrying',
           attempts,
@@ -1222,6 +1240,8 @@ async function handleQueue(batch, env, options = {}) {
         }).catch(() => {})
         message.retry({ delaySeconds: retryDelaySeconds })
       }
+    } finally {
+      tracker?.flush()
     }
   }
 }
@@ -1270,6 +1290,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
       if (!env.SMARTSUBS_CACHE) throw new Error('SMARTSUBS_CACHE KV binding is not configured')
 
       const tokenData = decodeTranslationTokenData(translationMatch[1], secret)
+      env.__kvUsageTracker?.setMedia(tokenData.media)
       const cache = getCache(env)
       const cacheKey = translationCacheKey(tokenData, userConfig.model, env)
       let joinWaitMs = 0
@@ -1428,6 +1449,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
           })
         }
       }
+      env.__kvUsageTracker?.setCacheResult(result.status)
       const totalMs = roundMs(nowMs() - startedAt)
       logPerf({
         milestone: 'M20R2',
@@ -1521,6 +1543,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
         englishTrackLimit: 5,
         publicBaseUrl: configuredBase(request, token),
         tokenSecret: secret,
+        media: { type: args.type, id: args.id },
         onDiagnostic: event => recordDiagnostic(env.SMARTSUBS_CACHE, configId, event)
       })
 
@@ -1680,18 +1703,26 @@ async function handleRequest(request, env, executionCtx = null) {
 
 export default {
   async fetch(request, env, executionCtx) {
+    const url = new URL(request.url)
+    const configured = url.pathname.match(/^\/c\/[^/]+(\/.*)$/)
+    const args = configured ? parseSubtitleArgs(configured[1]) : null
+    const phase = args ? 'subtitle-list' : configured?.[1].startsWith('/translated/') ? 'player-translation' : 'other'
+    const tracker = createKvUsageTracker({ phase, media: args && { type: args.type, id: args.id } })
+    const messageEnv = trackedEnvironment(env, tracker)
     try {
-      return await handleRequest(request, env, executionCtx)
+      return await handleRequest(request, messageEnv, executionCtx)
     } catch (error) {
       console.error(JSON.stringify({
         tag: 'SMARTSUBS_CF_FATAL',
         message: safeMessage(error, '')
       }))
       return send(500, 'text/plain; charset=utf-8', 'SmartSubs internal error', { noStore: true })
+    } finally {
+      tracker.flush()
     }
   },
   async queue(batch, env) {
-    await handleQueue(batch, env)
+    await handleQueue(batch, env, { trackUsage: true })
   }
 }
 

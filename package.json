@@ -5,7 +5,7 @@
   "description": "SmartSubs Malay subtitle Stremio addon",
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node --check src/*.js && node --check src/cloudflare-worker.mjs && node --check src/cf-cache.mjs"
+    "check": "node --check src/*.js && node --check src/cloudflare-worker.mjs && node --check src/cf-cache.mjs && node --check src/kv-usage.mjs"
   },
   "devDependencies": {
     "wrangler": "4.123.0"

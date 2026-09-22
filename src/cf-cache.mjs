@@ -22,8 +22,8 @@ export class CloudflareTranslationCache {
     this.kv = options.kv || null
     this.ttlMs = Math.max(60000, Number(options.ttlMs || 180 * 24 * 60 * 60 * 1000))
     this.version = String(options.version || 'm8-v1')
-    this.memory = new Map()
-    this.counters = { memoryHits: 0, kvHits: 0, misses: 0, stores: 0, expired: 0 }
+    this.memory = options.memory || new Map()
+    this.counters = options.counters || { memoryHits: 0, kvHits: 0, misses: 0, stores: 0, expired: 0 }
   }
   remember(key, value, expiresAt) {
     this.memory.delete(key)

@@ -5,6 +5,10 @@
   "compatibility_flags": [
     "nodejs_compat"
   ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
   "vars": {
     "GEMINI_MODEL": "gemini-3.5-flash-lite",
     "SMARTSUBS_CACHE_VERSION": "m8-v1",
