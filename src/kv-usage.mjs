@@ -40,6 +40,8 @@ export function createKvUsageTracker({ phase = 'other', media = null, attempt = 
     attempt,
     media: normaliseMedia(media),
     cacheResult: null,
+    configId: null,
+    setConfigId(value) { this.configId = /^[a-f0-9]{16}$/.test(String(value || '')) ? String(value) : null },
     setMedia(value) { this.media = normaliseMedia(value) },
     setCacheResult(value) { this.cacheResult = String(value || '').slice(0, 40) || null },
     wrap(kv) {

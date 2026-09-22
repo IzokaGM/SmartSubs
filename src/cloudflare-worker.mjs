@@ -8,6 +8,7 @@ import perfModule from './perf.js'
 import diagnosticsModule from './diagnostics.js'
 import { CloudflareTranslationCache, cfGetOrTranslate, makeCacheKey } from './cf-cache.mjs'
 import { createKvUsageTracker, trackedEnvironment } from './kv-usage.mjs'
+import { monitorStub, publishKvUsage, storeMonitorReport, readMonitorReports, pruneMonitorReports, renderKvMonitor } from './kv-monitor.mjs'
 
 const { createConfiguredManifest } = configuredManifestModule
 const { handleSubtitles } = subtitlesModule
@@ -640,6 +641,22 @@ export class TranslationDeliveryRelay {
   }
 
   async fetch(request) {
+    const path = new URL(request.url).pathname
+    // Usage reports use a separate DO idFromName namespace, never a relay instance.
+    if (path === '/usage' && request.method === 'POST') {
+      let payload
+      try { payload = await request.json() } catch { return new Response(null, { status: 400 }) }
+      const saved = await storeMonitorReport(this.ctx.storage, payload)
+      if (saved && !(await this.ctx.storage.getAlarm())) {
+        await this.ctx.storage.setAlarm(Date.now() + 86400000)
+      }
+      return new Response(null, { status: saved ? 204 : 400 })
+    }
+    if (path === '/usage' && request.method === 'GET') {
+      return new Response(JSON.stringify(await readMonitorReports(this.ctx.storage)), {
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+      })
+    }
     if (request.method === 'PUT') {
       const value = await request.text()
       if (!value.startsWith('WEBVTT') || value.length > 2 * 1024 * 1024) {
@@ -667,7 +684,15 @@ export class TranslationDeliveryRelay {
   }
 
   async alarm() {
-    await this.ctx.storage.deleteAll()
+    // Relay instances have no usage entries. They retain their existing cleanup.
+    const hasUsage = await pruneMonitorReports(this.ctx.storage)
+    if (hasUsage) {
+      const remaining = await this.ctx.storage.list({ prefix: 'usage:', limit: 1 })
+      if (remaining.size) await this.ctx.storage.setAlarm(Date.now() + 86400000)
+      else await this.ctx.storage.deleteAll()
+    } else {
+      await this.ctx.storage.deleteAll()
+    }
   }
 }
 
@@ -1026,6 +1051,7 @@ async function processQueueMessage(body, env, options = {}) {
   const configToken = String(payload.configToken || '')
   const translationToken = String(payload.translationToken || '')
   const configId = String(payload.configId || '')
+  env.__kvUsageTracker?.setConfigId(configId)
   const attempts = Math.max(1, Number(options.attempts || 1))
   const diagnosticFn = options.diagnosticFn || recordDiagnostic
   const getOrTranslateFn = options.getOrTranslateFn || cfGetOrTranslate
@@ -1192,6 +1218,7 @@ async function handleQueue(batch, env, options = {}) {
   for (const message of batch?.messages || []) {
     const tracker = options.trackUsage ? createKvUsageTracker({ phase: 'queue', attempt: message.attempts }) : null
     const messageEnv = tracker ? trackedEnvironment(env, tracker) : env
+    tracker?.setConfigId(message?.body?.configId)
     try {
       await processFn(message.body, messageEnv, {
         attempts: message.attempts
@@ -1242,6 +1269,7 @@ async function handleQueue(batch, env, options = {}) {
       }
     } finally {
       tracker?.flush()
+      if (tracker) await publishKvUsage(env, tracker).catch(() => {})
     }
   }
 }
@@ -1261,6 +1289,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
   }
 
   const configId = tokenFingerprint(token)
+  env.__kvUsageTracker?.setConfigId(configId)
 
   if (request.method === 'GET' && suffix === '/manifest.json') {
     return json(createConfiguredManifest(), 200, { noStore: true })
@@ -1271,6 +1300,22 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
       status: 302,
       headers: { location: '/configure', 'cache-control': 'no-store' }
     })
+  }
+
+  if (request.method === 'GET' && suffix === '/kv-monitor') {
+    const stub = monitorStub(env, configId)
+    if (!stub) return send(503, 'text/plain; charset=utf-8', 'KV Monitor requires SMARTSUBS_DELIVERY Durable Object binding', { noStore: true })
+    try {
+      const response = await stub.fetch('https://smartsubs-monitor.internal/usage')
+      if (!response.ok) throw new Error('Monitor not ready')
+      const reports = await response.json()
+      return send(200, 'text/html; charset=utf-8', renderKvMonitor(reports), {
+        noStore: true, csp: true,
+        headers: { 'referrer-policy': 'no-referrer', 'x-robots-tag': 'noindex, nofollow' }
+      })
+    } catch {
+      return send(503, 'text/plain; charset=utf-8', 'KV Monitor is temporarily unavailable', { noStore: true })
+    }
   }
 
   if (request.method === 'GET' && suffix === '/diagnose') {
@@ -1719,6 +1764,10 @@ export default {
       return send(500, 'text/plain; charset=utf-8', 'SmartSubs internal error', { noStore: true })
     } finally {
       tracker.flush()
+      // A monitor failure must never prevent subtitles from being delivered.
+      // waitUntil avoids delaying the player's subtitle request.
+      if (executionCtx?.waitUntil) executionCtx.waitUntil(publishKvUsage(env, tracker).catch(() => {}))
+      else await publishKvUsage(env, tracker).catch(() => {})
     }
   },
   async queue(batch, env) {
