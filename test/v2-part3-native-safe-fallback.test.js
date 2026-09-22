@@ -79,7 +79,7 @@ test('Part 3 weak native Malay offers Auto but disables background Gemini prefet
 
   assert.equal(result.subtitles.length, 2)
   assert.equal(result.subtitles[0].id, 'native-weak')
-  assert.match(result.subtitles[1].id, /^smartsubs-auto-/)
+  assert.match(result.subtitles[1].id, /^smartsubs-gemini-/)
   assert.equal(result.autoPrefetch, false)
   assert.equal(result.autoPrefetchReason, 'weak-native-wait-for-user-selection')
 

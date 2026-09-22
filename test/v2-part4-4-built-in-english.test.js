@@ -53,7 +53,7 @@ test('Part 4.4 returns Malay Auto first and ranked English alternatives after it
 
   assert.equal(result.subtitles.length, 3)
   assert.equal(result.subtitles[0].lang, 'msa')
-  assert.match(result.subtitles[0].id, /^smartsubs-auto-/)
+  assert.match(result.subtitles[0].id, /^smartsubs-gemini-/)
   assert.deepEqual(result.subtitles.slice(1).map(item => item.lang), ['eng', 'eng'])
   assert.deepEqual(result.subtitles.slice(1).map(item => item.id), [
     'smartsubs-eng-eng-one',

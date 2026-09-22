@@ -72,7 +72,7 @@ function buildAutoSubtitle(englishSubtitle, options = {}) {
   const token = createTranslationToken(englishSubtitle.url, tokenSecret, englishSubtitle.id, options.media)
   const shortId = crypto.createHash('sha1').update(englishSubtitle.url).digest('hex').slice(0, 12)
   return {
-    id: `smartsubs-auto-${shortId}`,
+    id: `smartsubs-gemini-${shortId}`,
     url: `${String(publicBaseUrl).replace(/\/+$/, '')}/translated/${token}.vtt`,
     lang: 'msa'
   }
