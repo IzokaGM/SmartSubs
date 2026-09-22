@@ -1,32 +1,60 @@
 name: SmartSubs CI
 
+# Run only after the ZIP apply workflow finishes successfully, or on demand.
+# In particular, do NOT run on the ZIP upload push itself.
 on:
   workflow_dispatch:
-  push:
+  workflow_run:
+    workflows:
+      - SmartSubs - Auto Apply KV Patch
+    types:
+      - completed
     branches:
       - main
-  pull_request:
-
-concurrency:
-  group: smartsubs-ci-${{ github.ref }}
-  cancel-in-progress: true
 
 permissions:
   contents: read
 
+concurrency:
+  group: smartsubs-ci-${{ github.event_name == 'workflow_run' && 'main' || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   validate:
+    # A completed workflow_run event also fires on failure/cancellation: ignore those.
+    # Manual runs remain available independently of the ZIP workflow.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Setup Node 24
-        uses: actions/setup-node@v7
+      - name: Checkout code after patch is applied
+        uses: actions/checkout@v4
         with:
-          node-version: "24"
+          # workflow_run.head_sha is the ORIGINAL ZIP-upload commit, not
+          # the subsequent commit produced by the ZIP apply workflow.
+          ref: ${{ github.event_name == 'workflow_run' && 'main' || github.ref }}
+
+      - name: Verify ZIP workflow finished applying patch
+        if: github.event_name == 'workflow_run'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -e SmartSubs_KV_Usage_Tracker_Patch.zip ]]; then
+            echo 'Patch ZIP still exists: auto-apply has not finished committing its changes.' >&2
+            exit 1
+          fi
+          test -f src/kv-usage.mjs
+          test -f test/kv-usage.test.js
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
           package-manager-cache: false
 
       - name: Verify repository
