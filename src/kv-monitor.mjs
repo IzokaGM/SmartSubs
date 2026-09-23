@@ -104,14 +104,56 @@ export async function pruneMonitorReports(storage, now = Date.now()) {
   return rows.size > 0
 }
 
+// Monitor delivery is best-effort and never changes subtitle delivery or Workers KV usage.
+// Report only safe metadata: never print tokens, configured URLs or API keys.
+function logMonitorFailure(tracker, reason, httpStatus) {
+  const entry = {
+    tag: 'SMARTSUBS_KV_MONITOR_ERROR',
+    reason,
+    phase: tracker?.phase || 'other',
+    mediaType: tracker?.media?.type || null,
+    configId: tracker?.configId || null
+  }
+  if (Number.isInteger(httpStatus)) entry.httpStatus = httpStatus
+  try { console.error(JSON.stringify(entry)) } catch {}
+}
+
 export async function publishKvUsage(env, tracker) {
-  const stub = monitorStub(env, tracker?.configId)
-  if (!stub || !tracker?.media) return false
-  const response = await stub.fetch('https://smartsubs-monitor.internal/usage', {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(tracker.snapshot())
-  })
-  return response.ok
+  // Unconfigured pages have no episode and should not create a usage report.
+  if (!tracker?.media) return false
+  if (!tracker.configId) {
+    logMonitorFailure(tracker, 'missing-config-id')
+    return false
+  }
+  let stub
+  try { stub = monitorStub(env, tracker.configId) } catch {
+    logMonitorFailure(tracker, 'monitor-binding-error')
+    return false
+  }
+  if (!stub) {
+    logMonitorFailure(tracker, 'missing-monitor-binding')
+    return false
+  }
+  const body = JSON.stringify(tracker.snapshot())
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await stub.fetch('https://smartsubs-monitor.internal/usage', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body
+      })
+      if (response.ok) return true
+      // Do not retry rejected reports (400/422); transient errors get one retry.
+      if (response.status < 500 || attempt === 2) {
+        logMonitorFailure(tracker, 'report-rejected', response.status)
+        return false
+      }
+    } catch {
+      if (attempt === 2) {
+        logMonitorFailure(tracker, 'monitor-transport-error')
+        return false
+      }
+    }
+  }
+  return false
 }
 
 function escapeHtml(value) {
@@ -131,5 +173,5 @@ export function renderKvMonitor(reports) {
     const cache = Object.entries(report.cacheResults || {}).map(([name, qty]) => `${escapeHtml(name)}: ${count(qty)}`).join(' · ') || 'No cache records'
     return `<details class="card"><summary><small>${escapeHtml(label)}</small><h2>${escapeHtml(report.media.id)}</h2><div class="summary"><span>${count(report.requests)} requests recorded</span><b>${count(report.attempted?.put)} Write · ${count(report.attempted?.get)} Read</b></div><time>${escapeHtml(new Date(report.last).toLocaleString('ms-MY', { timeZone: 'Asia/Kuala_Lumpur' }))}</time></summary><div class="inside">${metricsBlock(report.attempted)}<p class="hint">Cumulative KV operations for this episode over the reporting period, not a single viewing session.</p><h3>Usage breakdown</h3>${breakdown}<h3>By phase</h3>${phases}<h3>Cache results</h3><p>${cache}</p><p class="hint">Succeeded: ${count(report.succeeded?.get)} Read / ${count(report.succeeded?.put)} Write · Failed: ${count(report.failed?.get)} Read / ${count(report.failed?.put)} Write</p></div></details>`
   }).join('')
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>SmartSubs KV Monitor</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;padding:22px 14px 60px;background:#101419;color:#ecf1f5;font:15px/1.45 system-ui,-apple-system,sans-serif}.wrap{max-width:680px;margin:auto}h1{font-size:25px;margin:0 0 4px}.lead{color:#a3b0bd;margin:0 0 20px}.card{background:#1b232d;border:1px solid #364353;border-radius:15px;margin:10px 0;overflow:hidden}summary{cursor:pointer;padding:16px;list-style:none}summary::-webkit-details-marker{display:none}small{color:#9fb0c2;font-size:12px}h2{font-size:17px;overflow-wrap:anywhere;margin:5px 0 9px}.summary{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.summary b{color:#ffbd68}time{display:block;color:#9fb0c2;font-size:12px;margin-top:8px}.inside{padding:0 16px 17px}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.metrics>div{background:#111820;border-radius:9px;padding:10px 5px;text-align:center}.metrics strong{display:block;font-size:21px;margin-top:4px}.detail{display:flex;justify-content:space-between;gap:8px;padding:9px 0;border-bottom:1px solid #2f3c48}.detail b{white-space:nowrap}.hint{color:#a3b0bd;font-size:12px}h3{font-size:15px;margin:20px 0 5px}.empty{padding:20px;border:1px dashed #465666;border-radius:12px;color:#adbac8}button{background:#2a78e4;color:white;border:0;border-radius:10px;padding:10px 14px;font-weight:650;margin:4px 0 10px}footer{color:#8a9aaa;font-size:12px;margin-top:22px}</style></head><body><main class="wrap"><h1>SmartSubs KV Monitor</h1><p class="lead">Last 7 calendar days, including today · By movie and episode</p><form method="GET"><button type="submit">Refresh</button></form>${cards || '<div class="empty">No reports yet. Play an episode, wait a moment, then refresh.</div>'}<footer>Shows KV operations recorded by the tracker for this SmartSubs configuration. Reports may take a moment to appear. Monitor Durable Object operations are not Workers KV operations. Do not share this page URL; it contains your configuration token.</footer></main></body></html>`
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>SmartSubs KV Monitor</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;padding:22px 14px 60px;background:#101419;color:#ecf1f5;font:15px/1.45 system-ui,-apple-system,sans-serif}.wrap{max-width:680px;margin:auto}h1{font-size:25px;margin:0 0 4px}.lead{color:#a3b0bd;margin:0 0 20px}.card{background:#1b232d;border:1px solid #364353;border-radius:15px;margin:10px 0;overflow:hidden}summary{cursor:pointer;padding:16px;list-style:none}summary::-webkit-details-marker{display:none}small{color:#9fb0c2;font-size:12px}h2{font-size:17px;overflow-wrap:anywhere;margin:5px 0 9px}.summary{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.summary b{color:#ffbd68}time{display:block;color:#9fb0c2;font-size:12px;margin-top:8px}.inside{padding:0 16px 17px}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.metrics>div{background:#111820;border-radius:9px;padding:10px 5px;text-align:center}.metrics strong{display:block;font-size:21px;margin-top:4px}.detail{display:flex;justify-content:space-between;gap:8px;padding:9px 0;border-bottom:1px solid #2f3c48}.detail b{white-space:nowrap}.hint{color:#a3b0bd;font-size:12px}h3{font-size:15px;margin:20px 0 5px}.empty{padding:20px;border:1px dashed #465666;border-radius:12px;color:#adbac8}button{background:#2a78e4;color:white;border:0;border-radius:10px;padding:10px 14px;font-weight:650;margin:4px 0 10px}footer{color:#8a9aaa;font-size:12px;margin-top:22px}</style></head><body><main class="wrap"><h1>SmartSubs KV Monitor</h1><p class="lead">Last 7 calendar days, including today · By movie and episode</p><form method="GET"><button type="submit">Refresh</button></form>${cards || '<div class="empty">No reports yet for this configured addon. Play an episode, wait a moment, then refresh. If your player uses a different SmartSubs installation, its reports will be in that installation’s monitor.</div>'}<footer>Shows KV operations recorded by the tracker for this SmartSubs configuration. Reports may take a moment to appear. Monitor Durable Object operations are not Workers KV operations. Do not share this page URL; it contains your configuration token.</footer></main></body></html>`
 }

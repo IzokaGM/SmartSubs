@@ -1269,7 +1269,7 @@ async function handleQueue(batch, env, options = {}) {
       }
     } finally {
       tracker?.flush()
-      if (tracker) await publishKvUsage(env, tracker).catch(() => {})
+      if (tracker) await publishKvUsage(env, tracker)
     }
   }
 }
@@ -1766,8 +1766,8 @@ export default {
       tracker.flush()
       // A monitor failure must never prevent subtitles from being delivered.
       // waitUntil avoids delaying the player's subtitle request.
-      if (executionCtx?.waitUntil) executionCtx.waitUntil(publishKvUsage(env, tracker).catch(() => {}))
-      else await publishKvUsage(env, tracker).catch(() => {})
+      if (executionCtx?.waitUntil) executionCtx.waitUntil(publishKvUsage(env, tracker))
+      else await publishKvUsage(env, tracker)
     }
   },
   async queue(batch, env) {
