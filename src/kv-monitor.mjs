@@ -104,56 +104,124 @@ export async function pruneMonitorReports(storage, now = Date.now()) {
   return rows.size > 0
 }
 
-// Monitor delivery is best-effort and never changes subtitle delivery or Workers KV usage.
-// Report only safe metadata: never print tokens, configured URLs or API keys.
-function logMonitorFailure(tracker, reason, httpStatus) {
-  const entry = {
-    tag: 'SMARTSUBS_KV_MONITOR_ERROR',
-    reason,
-    phase: tracker?.phase || 'other',
-    mediaType: tracker?.media?.type || null,
-    configId: tracker?.configId || null
+// Manual measurement windows are independent of player sessions. We take differences
+// of the EXISTING v1 episode totals: no changes to usage publication or Workers KV.
+const ACTIVE_TEST_KEY = 'kv-test:v1:active'
+const TEST_HISTORY_KEY = 'kv-test:v1:history'
+const TEST_SEQUENCE_KEY = 'kv-test:v1:sequence'
+const MAX_TEST_HISTORY = 20
+const MAX_TEST_HOURS = 4
+
+const subCounts = (now, before) => Object.fromEntries(METHODS.map(method =>
+  [method, Math.max(0, (now?.[method] || 0) - (before?.[method] || 0))]))
+const subCategories = (now, before) => Object.fromEntries(CATEGORIES.map(cat =>
+  [cat, subCounts(now?.[cat], before?.[cat])]))
+
+function reportDelta(current, baseline) {
+  const prior = new Map((baseline || []).map(item => [`${item.media.type}:${item.media.id}`, item]))
+  return (current || []).map(item => {
+    const before = prior.get(`${item.media.type}:${item.media.id}`)
+    const requests = Math.max(0, (item.requests || 0) - (before?.requests || 0))
+    if (!requests) return null
+    const phases = {}
+    for (const [name, phase] of Object.entries(item.phases || {})) {
+      const old = before?.phases?.[name]
+      const qty = Math.max(0, (phase.requests || 0) - (old?.requests || 0))
+      if (qty) phases[name] = {
+        requests: qty,
+        attempted: subCounts(phase.attempted, old?.attempted),
+        failed: subCounts(phase.failed, old?.failed)
+      }
+    }
+    const cacheResults = {}
+    for (const [name, qty] of Object.entries(item.cacheResults || {})) {
+      const delta = Math.max(0, qty - (before?.cacheResults?.[name] || 0))
+      if (delta) cacheResults[name] = delta
+    }
+    return {
+      media: item.media, last: item.last, requests,
+      attempted: subCounts(item.attempted, before?.attempted),
+      succeeded: subCounts(item.succeeded, before?.succeeded),
+      failed: subCounts(item.failed, before?.failed),
+      categories: subCategories(item.categories, before?.categories),
+      phases, cacheResults
+    }
+  }).filter(Boolean)
+}
+
+function summarizeTest(reports) {
+  const sum = { requests: 0, attempted: zero(), succeeded: zero(), failed: zero(), categories: cleanCategories(null) }
+  for (const r of reports) {
+    sum.requests += r.requests
+    sum.attempted = plus(sum.attempted, r.attempted)
+    sum.succeeded = plus(sum.succeeded, r.succeeded)
+    sum.failed = plus(sum.failed, r.failed)
+    for (const cat of CATEGORIES) sum.categories[cat] = plus(sum.categories[cat], r.categories?.[cat])
   }
-  if (Number.isInteger(httpStatus)) entry.httpStatus = httpStatus
-  try { console.error(JSON.stringify(entry)) } catch {}
+  return sum
+}
+
+export async function startMonitorTest(storage, now = Date.now()) {
+  if (await storage.get(ACTIVE_TEST_KEY)) return { ok: false, reason: 'A test is already running.' }
+  const baseline = await readMonitorReports(storage, now)
+  const number = Math.max(0, Number(await storage.get(TEST_SEQUENCE_KEY)) || 0) + 1
+  const active = { id: crypto.randomUUID(), number, start: now, baseline }
+  await storage.put(TEST_SEQUENCE_KEY, number)
+  await storage.put(ACTIVE_TEST_KEY, active)
+  return { ok: true, active: { id: active.id, number, start: active.start } }
+}
+
+export async function endMonitorTest(storage, now = Date.now()) {
+  const active = await storage.get(ACTIVE_TEST_KEY)
+  if (!active) return { ok: false, reason: 'No test is running.' }
+  const reports = reportDelta(await readMonitorReports(storage, now), active.baseline)
+  const test = {
+    id: active.id, number: active.number, start: active.start, end: now, reports,
+    totals: summarizeTest(reports),
+    note: 'Manual time window; late queue/monitor events may not be included.'
+  }
+  const history = await storage.get(TEST_HISTORY_KEY) || []
+  await storage.put(TEST_HISTORY_KEY, [test, ...history].slice(0, MAX_TEST_HISTORY))
+  await storage.delete(ACTIVE_TEST_KEY)
+  return { ok: true, test }
+}
+
+export async function pruneMonitorTestHistory(storage, now = Date.now()) {
+  const history = await storage.get(TEST_HISTORY_KEY) || []
+  const recent = history.filter(test => Number(test.end) > now - WINDOW_MS)
+  if (recent.length !== history.length) {
+    if (recent.length) await storage.put(TEST_HISTORY_KEY, recent)
+    else await storage.delete(TEST_HISTORY_KEY)
+  }
+  const active = await storage.get(ACTIVE_TEST_KEY)
+  if (active && Number(active.start) <= now - WINDOW_MS) await storage.delete(ACTIVE_TEST_KEY)
+  return Boolean(recent.length || (active && Number(active.start) > now - WINDOW_MS))
+}
+
+export async function readMonitorTestState(storage, now = Date.now(), reports = null) {
+  const active = await storage.get(ACTIVE_TEST_KEY)
+  const history = await storage.get(TEST_HISTORY_KEY) || []
+  if (!active) return { active: null, history }
+  const current = reports || await readMonitorReports(storage, now)
+  const runningReports = reportDelta(current, active.baseline)
+  return {
+    active: {
+      id: active.id, number: active.number, start: active.start, reports: runningReports,
+      totals: summarizeTest(runningReports),
+      elapsedHours: (now - active.start) / 3600000,
+      longRunning: now - active.start > MAX_TEST_HOURS * 3600000
+    }, history
+  }
 }
 
 export async function publishKvUsage(env, tracker) {
-  // Unconfigured pages have no episode and should not create a usage report.
-  if (!tracker?.media) return false
-  if (!tracker.configId) {
-    logMonitorFailure(tracker, 'missing-config-id')
-    return false
-  }
-  let stub
-  try { stub = monitorStub(env, tracker.configId) } catch {
-    logMonitorFailure(tracker, 'monitor-binding-error')
-    return false
-  }
-  if (!stub) {
-    logMonitorFailure(tracker, 'missing-monitor-binding')
-    return false
-  }
-  const body = JSON.stringify(tracker.snapshot())
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const response = await stub.fetch('https://smartsubs-monitor.internal/usage', {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body
-      })
-      if (response.ok) return true
-      // Do not retry rejected reports (400/422); transient errors get one retry.
-      if (response.status < 500 || attempt === 2) {
-        logMonitorFailure(tracker, 'report-rejected', response.status)
-        return false
-      }
-    } catch {
-      if (attempt === 2) {
-        logMonitorFailure(tracker, 'monitor-transport-error')
-        return false
-      }
-    }
-  }
-  return false
+  const stub = monitorStub(env, tracker?.configId)
+  if (!stub || !tracker?.media) return false
+  const response = await stub.fetch('https://smartsubs-monitor.internal/usage', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(tracker.snapshot())
+  })
+  return response.ok
 }
 
 function escapeHtml(value) {
@@ -165,13 +233,29 @@ function metricsBlock(counts) {
   return `<div class="metrics">${METHODS.map(method => `<div><small>${{get:'Read',put:'Write',list:'List',delete:'Delete'}[method]}</small><strong>${count(counts?.[method])}</strong></div>`).join('')}</div>`
 }
 
-export function renderKvMonitor(reports) {
+function formatDate(ms) { return new Date(ms).toLocaleString('en-MY', { timeZone: 'Asia/Kuala_Lumpur' }) }
+function testSummary(test, active = false) {
+  const total = test.totals || summarizeTest(test.reports || [])
+  const title = `Test #${Number.isInteger(test.number) ? test.number : '–'} · ${active ? 'In progress' : 'Saved'}`
+  const endTime = active ? 'In progress' : formatDate(test.end)
+  const episodeRows = (test.reports || []).map(r => {
+    const type = r.media.type === 'movie' ? 'Movie' : `S${r.media.season ?? '?'}E${r.media.episode ?? '?'}`
+    const sources = CATEGORIES.map(cat => `<div class="detail"><span>${{ 'translation-cache':'Translation cache', 'queue-state':'Queue status', diagnostics:'Diagnostics', other:'Other' }[cat]}</span><b>${count(r.categories?.[cat]?.put)} W · ${count(r.categories?.[cat]?.get)} R</b></div>`).join('')
+    return `<details class="episode"><summary><b>${escapeHtml(type)} · ${escapeHtml(r.media.id)}</b><br><small>${count(r.requests)} requests · ${count(r.attempted.put)} Write · ${count(r.attempted.get)} Read</small></summary><div class="inside">${metricsBlock(r.attempted)}${sources}</div></details>`
+  }).join('')
+  return `<details class="card" ${active ? 'open' : ''}><summary><small>${escapeHtml(title)} · ${escapeHtml(formatDate(test.start))}</small><h2>${count(total.attempted?.put)} Write · ${count(total.attempted?.get)} Read</h2><div class="summary"><span>${count(total.requests)} requests · ${count((test.reports || []).length)} media</span><span>${escapeHtml(endTime)}</span></div></summary><div class="inside"><h3>Test totals</h3>${metricsBlock(total.attempted)}<h3>Usage breakdown</h3>${CATEGORIES.map(cat => `<div class="detail"><span>${{ 'translation-cache':'Translation cache', 'queue-state':'Queue status', diagnostics:'Diagnostics', other:'Other' }[cat]}</span><b>${count(total.categories?.[cat]?.put)} W · ${count(total.categories?.[cat]?.get)} R</b></div>`).join('')}<h3>Movies and episodes</h3>${episodeRows || '<p class="hint">No media requests recorded during this test.</p>'}<p class="hint">${escapeHtml(test.note || 'Manual measurement window; not an automatic player session.')}</p></div></details>`
+}
+
+export function renderKvMonitor(reports, testState = { active: null, history: [] }) {
+  const active = testState.active
+  const history = testState.history || []
+  const tests = [active ? testSummary(active, true) : '', ...history.map(t => testSummary(t))].join('')
   const cards = reports.map(report => {
     const label = report.media.type === 'movie' ? 'Movie' : `Series · Season ${report.media.season ?? '?'} · Episode ${report.media.episode ?? '?'}`
-    const breakdown = CATEGORIES.map(cat => `<div class="detail"><span>${{ 'translation-cache':'Translation cache', 'queue-state':'Queue status', diagnostics:'Diagnostics', other:'Other' }[cat]}</span><b>${count(report.categories?.[cat]?.put)} W · ${count(report.categories?.[cat]?.get)} R</b></div>`).join('')
-    const phases = Object.entries(report.phases || {}).map(([phase, item]) => `<div class="detail"><span>${escapeHtml(phase)} (${count(item.requests)} requests)</span><b>${count(item.attempted?.put)} W · ${count(item.attempted?.get)} R</b></div>`).join('')
-    const cache = Object.entries(report.cacheResults || {}).map(([name, qty]) => `${escapeHtml(name)}: ${count(qty)}`).join(' · ') || 'No cache records'
-    return `<details class="card"><summary><small>${escapeHtml(label)}</small><h2>${escapeHtml(report.media.id)}</h2><div class="summary"><span>${count(report.requests)} requests recorded</span><b>${count(report.attempted?.put)} Write · ${count(report.attempted?.get)} Read</b></div><time>${escapeHtml(new Date(report.last).toLocaleString('ms-MY', { timeZone: 'Asia/Kuala_Lumpur' }))}</time></summary><div class="inside">${metricsBlock(report.attempted)}<p class="hint">Cumulative KV operations for this episode over the reporting period, not a single viewing session.</p><h3>Usage breakdown</h3>${breakdown}<h3>By phase</h3>${phases}<h3>Cache results</h3><p>${cache}</p><p class="hint">Succeeded: ${count(report.succeeded?.get)} Read / ${count(report.succeeded?.put)} Write · Failed: ${count(report.failed?.get)} Read / ${count(report.failed?.put)} Write</p></div></details>`
+    return `<details class="card"><summary><small>${escapeHtml(label)}</small><h2>${escapeHtml(report.media.id)}</h2><div class="summary"><span>${count(report.requests)} requests recorded</span><b>${count(report.attempted?.put)} Write · ${count(report.attempted?.get)} Read</b></div><time>${escapeHtml(formatDate(report.last))}</time></summary><div class="inside">${metricsBlock(report.attempted)}<p class="hint">Cumulative operations for this episode across all tests.</p></div></details>`
   }).join('')
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>SmartSubs KV Monitor</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;padding:22px 14px 60px;background:#101419;color:#ecf1f5;font:15px/1.45 system-ui,-apple-system,sans-serif}.wrap{max-width:680px;margin:auto}h1{font-size:25px;margin:0 0 4px}.lead{color:#a3b0bd;margin:0 0 20px}.card{background:#1b232d;border:1px solid #364353;border-radius:15px;margin:10px 0;overflow:hidden}summary{cursor:pointer;padding:16px;list-style:none}summary::-webkit-details-marker{display:none}small{color:#9fb0c2;font-size:12px}h2{font-size:17px;overflow-wrap:anywhere;margin:5px 0 9px}.summary{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.summary b{color:#ffbd68}time{display:block;color:#9fb0c2;font-size:12px;margin-top:8px}.inside{padding:0 16px 17px}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.metrics>div{background:#111820;border-radius:9px;padding:10px 5px;text-align:center}.metrics strong{display:block;font-size:21px;margin-top:4px}.detail{display:flex;justify-content:space-between;gap:8px;padding:9px 0;border-bottom:1px solid #2f3c48}.detail b{white-space:nowrap}.hint{color:#a3b0bd;font-size:12px}h3{font-size:15px;margin:20px 0 5px}.empty{padding:20px;border:1px dashed #465666;border-radius:12px;color:#adbac8}button{background:#2a78e4;color:white;border:0;border-radius:10px;padding:10px 14px;font-weight:650;margin:4px 0 10px}footer{color:#8a9aaa;font-size:12px;margin-top:22px}</style></head><body><main class="wrap"><h1>SmartSubs KV Monitor</h1><p class="lead">Last 7 calendar days, including today · By movie and episode</p><form method="GET"><button type="submit">Refresh</button></form>${cards || '<div class="empty">No reports yet for this configured addon. Play an episode, wait a moment, then refresh. If your player uses a different SmartSubs installation, its reports will be in that installation’s monitor.</div>'}<footer>Shows KV operations recorded by the tracker for this SmartSubs configuration. Reports may take a moment to appear. Monitor Durable Object operations are not Workers KV operations. Do not share this page URL; it contains your configuration token.</footer></main></body></html>`
+  const controls = active
+    ? `<form method="POST" action="kv-monitor/test/end"><button type="submit" class="end">End Test</button></form><p class="hint">Started ${escapeHtml(formatDate(active.start))}. Finish playback and wait a few seconds for the last usage reports before ending the test.${active.longRunning ? ' This test has been running for over 4 hours.' : ''}</p>`
+    : `<form method="POST" action="kv-monitor/test/start"><button type="submit">Start Test</button></form>`
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>SmartSubs KV Monitor</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;padding:22px 14px 60px;background:#101419;color:#ecf1f5;font:15px/1.45 system-ui,-apple-system,sans-serif}.wrap{max-width:680px;margin:auto}h1{font-size:25px;margin:0 0 4px}.lead{color:#a3b0bd;margin:0 0 15px}.card{background:#1b232d;border:1px solid #364353;border-radius:15px;margin:10px 0;overflow:hidden}summary{cursor:pointer;padding:16px;list-style:none}summary::-webkit-details-marker{display:none}small{color:#9fb0c2;font-size:12px}h2{font-size:17px;overflow-wrap:anywhere;margin:5px 0 9px}.summary{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}.summary b{color:#ffbd68}time{display:block;color:#9fb0c2;font-size:12px;margin-top:8px}.inside{padding:0 16px 17px}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}.metrics>div{background:#111820;border-radius:9px;padding:10px 5px;text-align:center}.metrics strong{display:block;font-size:21px;margin-top:4px}.detail{display:flex;justify-content:space-between;gap:8px;padding:9px 0;border-bottom:1px solid #2f3c48}.detail b{white-space:nowrap}.hint{color:#a3b0bd;font-size:12px}h3{font-size:15px;margin:20px 0 5px}.empty{padding:20px;border:1px dashed #465666;border-radius:12px;color:#adbac8}button{background:#2a78e4;color:white;border:0;border-radius:10px;padding:12px 17px;font-weight:650;margin:4px 0 10px;min-height:44px}.end{background:#c35e34}.episode{background:#131b23;border:1px solid #33404d;border-radius:10px;margin:8px 0}.episode summary{padding:10px}.episode .inside{padding:4px 12px 12px}footer{color:#8a9aaa;font-size:12px;margin-top:22px}</style></head><body><main class="wrap"><h1>SmartSubs KV Monitor</h1><p class="lead">Manual tests · Saved separately, even for the same episode</p>${controls}<form method="GET"><button type="submit">Refresh</button></form><h3>Test history (${history.length} · last 7 days)</h3>${tests || '<div class="empty">No tests saved. Press Start Test before playing a video.</div>'}<details><summary>All-time episode totals (last 7 days)</summary>${cards || '<div class="empty">No reports yet.</div>'}</details><footer>Each test measures the difference between Start Test and End Test. It is not a player session ID. Other simultaneous playback or late queue reports can affect attribution. Monitor storage is in a Durable Object; it adds no Workers KV operations. Keep this URL private.</footer></main></body></html>`
 }

@@ -140,11 +140,12 @@ test('Mobile page escapes stored media id and shows read/write from queue and di
 })
 
 
-test('English first-version UI preserves cumulative reports without manual session controls', async () => {
+test('English monitor preserves cumulative reports alongside manual test controls', async () => {
   const { renderKvMonitor } = await import('../src/kv-monitor.mjs')
   const html = renderKvMonitor([{ media: { type: 'series', id: 'tt123:2:8', season: 2, episode: 8 }, requests: 2, attempted: { get: 1, put: 4 }, categories: {}, phases: {}, last: Date.now() }])
   assert.match(html, /Series · Season 2 · Episode 8/)
   assert.match(html, /2 requests recorded/)
-  assert.match(html, /Cumulative KV operations/)
-  assert.doesNotMatch(html, /Mula ujian|Tamatkan ujian|kv-monitor\/session/)
+  assert.match(html, /Cumulative operations/)
+  assert.match(html, /Start Test/)
+  assert.doesNotMatch(html, /Mula ujian|Tamatkan ujian|auto-event:v1:/)
 })

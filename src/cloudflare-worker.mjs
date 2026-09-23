@@ -8,7 +8,7 @@ import perfModule from './perf.js'
 import diagnosticsModule from './diagnostics.js'
 import { CloudflareTranslationCache, cfGetOrTranslate, makeCacheKey } from './cf-cache.mjs'
 import { createKvUsageTracker, trackedEnvironment } from './kv-usage.mjs'
-import { monitorStub, publishKvUsage, storeMonitorReport, readMonitorReports, pruneMonitorReports, renderKvMonitor } from './kv-monitor.mjs'
+import { monitorStub, publishKvUsage, storeMonitorReport, readMonitorReports, pruneMonitorReports, renderKvMonitor, startMonitorTest, endMonitorTest, readMonitorTestState, pruneMonitorTestHistory } from './kv-monitor.mjs'
 
 const { createConfiguredManifest } = configuredManifestModule
 const { handleSubtitles } = subtitlesModule
@@ -657,6 +657,30 @@ export class TranslationDeliveryRelay {
         headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
       })
     }
+    if (path === '/monitor' && request.method === 'GET') {
+      const reports = await readMonitorReports(this.ctx.storage)
+      const testState = await readMonitorTestState(this.ctx.storage, Date.now(), reports)
+      return new Response(JSON.stringify({ reports, testState }), {
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+      })
+    }
+    if (path === '/test/start' && request.method === 'POST') {
+      const result = await startMonitorTest(this.ctx.storage)
+      if (result.ok && !(await this.ctx.storage.getAlarm())) {
+        await this.ctx.storage.setAlarm(Date.now() + 86400000)
+      }
+      return new Response(JSON.stringify(result), {
+        status: result.ok ? 200 : 409,
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+      })
+    }
+    if (path === '/test/end' && request.method === 'POST') {
+      const result = await endMonitorTest(this.ctx.storage)
+      return new Response(JSON.stringify(result), {
+        status: result.ok ? 200 : 409,
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+      })
+    }
     if (request.method === 'PUT') {
       const value = await request.text()
       if (!value.startsWith('WEBVTT') || value.length > 2 * 1024 * 1024) {
@@ -685,14 +709,11 @@ export class TranslationDeliveryRelay {
 
   async alarm() {
     // Relay instances have no usage entries. They retain their existing cleanup.
-    const hasUsage = await pruneMonitorReports(this.ctx.storage)
-    if (hasUsage) {
-      const remaining = await this.ctx.storage.list({ prefix: 'usage:', limit: 1 })
-      if (remaining.size) await this.ctx.storage.setAlarm(Date.now() + 86400000)
-      else await this.ctx.storage.deleteAll()
-    } else {
-      await this.ctx.storage.deleteAll()
-    }
+    await pruneMonitorReports(this.ctx.storage)
+    const hasTests = await pruneMonitorTestHistory(this.ctx.storage)
+    const remaining = await this.ctx.storage.list({ prefix: 'usage:', limit: 1 })
+    if (remaining.size || hasTests) await this.ctx.storage.setAlarm(Date.now() + 86400000)
+    else await this.ctx.storage.deleteAll()
   }
 }
 
@@ -1269,7 +1290,7 @@ async function handleQueue(batch, env, options = {}) {
       }
     } finally {
       tracker?.flush()
-      if (tracker) await publishKvUsage(env, tracker)
+      if (tracker) await publishKvUsage(env, tracker).catch(() => {})
     }
   }
 }
@@ -1302,14 +1323,34 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
     })
   }
 
+  if (request.method === 'POST' && (suffix === '/kv-monitor/test/start' || suffix === '/kv-monitor/test/end')) {
+    const stub = monitorStub(env, configId)
+    if (!stub) return send(503, 'text/plain; charset=utf-8', 'KV Monitor is not available', { noStore: true })
+    // The configured token must already have passed verification above.
+    const action = suffix.endsWith('/start') ? 'start' : 'end'
+    try {
+      const response = await stub.fetch(`https://smartsubs-monitor.internal/test/${action}`, { method: 'POST' })
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}))
+        return send(response.status, 'text/plain; charset=utf-8', String(result.reason || 'Monitor test action failed'), { noStore: true })
+      }
+      return new Response(null, { status: 303, headers: {
+        location: new URL(request.url).pathname.replace(/\/test\/(start|end)$/, ''),
+        'cache-control': 'no-store', 'referrer-policy': 'no-referrer'
+      } })
+    } catch {
+      return send(503, 'text/plain; charset=utf-8', 'Monitor test is temporarily unavailable', { noStore: true })
+    }
+  }
+
   if (request.method === 'GET' && suffix === '/kv-monitor') {
     const stub = monitorStub(env, configId)
     if (!stub) return send(503, 'text/plain; charset=utf-8', 'KV Monitor requires SMARTSUBS_DELIVERY Durable Object binding', { noStore: true })
     try {
-      const response = await stub.fetch('https://smartsubs-monitor.internal/usage')
+      const response = await stub.fetch('https://smartsubs-monitor.internal/monitor')
       if (!response.ok) throw new Error('Monitor not ready')
-      const reports = await response.json()
-      return send(200, 'text/html; charset=utf-8', renderKvMonitor(reports), {
+      const { reports, testState } = await response.json()
+      return send(200, 'text/html; charset=utf-8', renderKvMonitor(reports, testState), {
         noStore: true, csp: true,
         headers: { 'referrer-policy': 'no-referrer', 'x-robots-tag': 'noindex, nofollow' }
       })
@@ -1766,8 +1807,8 @@ export default {
       tracker.flush()
       // A monitor failure must never prevent subtitles from being delivered.
       // waitUntil avoids delaying the player's subtitle request.
-      if (executionCtx?.waitUntil) executionCtx.waitUntil(publishKvUsage(env, tracker))
-      else await publishKvUsage(env, tracker)
+      if (executionCtx?.waitUntil) executionCtx.waitUntil(publishKvUsage(env, tracker).catch(() => {}))
+      else await publishKvUsage(env, tracker).catch(() => {})
     }
   },
   async queue(batch, env) {

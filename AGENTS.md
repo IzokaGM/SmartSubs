@@ -9,7 +9,7 @@ Scope: this file applies to **SmartSubs only**. Read the current repository befo
 - Native Malay tracks are preferred by existing selection logic. **Requested future product direction, not part of the ID rename:** offer a manually selectable Gemini track alongside strong native Malay when an English source and valid user configuration exist. When native Malay is available, do NOT pretranslate solely to present the option; only translate on selection. Confirm changes against current logic and regression tests before shipping.
 - VUEO seek causes repeated subtitle requests; this is already established. Do not ask the user to retest seek solely to reconfirm. Repeat requests must not trigger needless Gemini translation or cache writes.
 - KV usage samples are cumulative unless specifically marked as a monitor test session. One observed cached episode produced 12 diagnostic KV writes from 5 requests. An observed newly translated episode produced 33 writes (29 diagnostics, 3 queue, 1 translation cache) and 64 reads from 11 requests; later seek/replay increased cumulative totals to 49 writes and 67 reads. These are samples, NOT per-episode constants or capacity promises.
-- **Current decision:** Keep KV diagnostic writes ON. Do not switch them off unless the user explicitly approves after reviewing usage. Maintain Gemini, cache, queue, Diagnose and KV Monitor. The supported KV Monitor is the first-version English per-episode cumulative view; manual and automatic session experiments were rolled back because new reports stopped appearing.
+- **Current decision:** KV diagnostic writes remain ON. Do not disable them without explicit approval after reviewing KV Monitor measurements. Keep Gemini, translation cache, queue, delivery, KV Usage Tracker and mobile KV Monitor working; the monitor uses a Durable Object, not extra Workers KV writes. Do not promise a fixed quota saving.
 - Do not publish private configured addon URLs, tokens, API keys or client IPs in logs or docs.
 
 ## Patch/deployment rules
@@ -19,8 +19,9 @@ Scope: this file applies to **SmartSubs only**. Read the current repository befo
 - The universal workflow checks/extracts, runs `npm run check` and `npm test`, commits the patch and removes the ZIP if successful. A green GitHub workflow does NOT establish that a new Cloudflare Worker was deployed; check deployment separately.
 - Keep changes narrowly scoped. Verify test results before reporting them; distinguish measured KV data from estimates. When user is on a phone, prefer one monitor screenshot to copying Cloudflare log records one-by-one.
 
-## KV Monitor delivery maintenance (23 September 2026)
+## Active baseline / temporary KV audit (24 September 2026)
 
-- Base is the hard-reset `SmartSubs-main (2).zip` plus the original English KV Monitor V1 UI patch. Keep selection, Gemini, queue, cache, KV diagnostics and `.github/workflows` unchanged for monitor-only fixes.
-- The monitor publishes usage to a per-configuration Durable Object using `publishKvUsage()`, not to Workers KV. Invalid/mismatched addon configuration links can show a different report set. Do not infer a successful live report from passing mock tests.
-- On failure, search Worker logs for `SMARTSUBS_KV_MONITOR_ERROR`. Only log a safe cause and HTTP status; do not log configured URLs, tokens, API keys or response bodies. Retries must be bounded and must not delay or break subtitle delivery.
+- The approved base for the current KV Monitor patch is `SmartSubs-main (2).zip` (hard-reset working Gemini Subtitle ID branch) plus **KV Monitor V1 English**; do not reintroduce the later Delivery Fix, auto-session, queue/cache recovery, or source-selection patches.
+- KV diagnostic writes remain **ON**. A previous suggestion to disable them by default was **not approved**. Do not change diagnostics or queue/Gemini while changing the monitor.
+- KV Monitor manual test history: Start Test snapshots the existing v1 aggregate; End Test saves a numbered difference; tests for the same episode are independent. Keep the original per-episode recording pipeline intact. No VUEO changes; no player session ID is asserted. Do not reset cumulative reports or delete translation cache.
+- No installation instructions unless requested. Distinguish local tests from Cloudflare deployment results.
