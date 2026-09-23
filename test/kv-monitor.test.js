@@ -136,101 +136,15 @@ test('Mobile page escapes stored media id and shows read/write from queue and di
   assert.match(html, /&lt;script&gt;/)
   assert.doesNotMatch(html, /<script>hello/)
   assert.match(html, /6 Write/)
-  assert.match(html, /Muat semula/)
+  assert.match(html, /Refresh/)
 })
 
-test('Manual test window isolates seek requests from pre-test and post-test totals, including queue reports', async () => {
-  const { TranslationDeliveryRelay } = await import('../src/cloudflare-worker.mjs')
-  const relay = new TranslationDeliveryRelay({ storage: mockStorage() }, {})
-  const media = { type: 'series', id: 'tt1196946:2:3' }
-  const post = (path, value) => relay.fetch(new Request('https://internal' + path, {
-    method: 'POST', body: JSON.stringify(value)
-  }))
-  const first = snapshot('series', media.id, 'subtitle-list', { get: 2, put: 4 })
-  assert.equal((await post('/usage', first)).status, 204)
-  const start = await post('/usage/session/start', { media })
-  assert.equal(start.status, 204)
-  assert.equal((await post('/usage/session/start', { media })).status, 409)
-  const during = snapshot('series', media.id, 'player-translation', { get: 0, put: 2 })
-  assert.equal((await post('/usage', during)).status, 204)
-  assert.equal((await post('/usage', during)).status, 400)
-  assert.equal((await post('/usage', snapshot('series', media.id, 'queue', { get: 4, put: 3 }))).status, 204)
-  const two = await (await relay.fetch(new Request('https://internal/usage?tests=1'))).json()
-  const latest = two.tests[0]
-  assert.equal(latest.status, 'active')
-  assert.deepEqual([latest.requests, latest.attempted.get, latest.attempted.put], [2, 4, 5])
-  assert.deepEqual([two.reports[0].requests, two.reports[0].attempted.get, two.reports[0].attempted.put], [3, 6, 9])
-  assert.equal((await post('/usage/session/stop', { media })).status, 204)
-  assert.equal((await post('/usage', snapshot('series', media.id, 'player-translation', { get: 1, put: 2 }))).status, 204)
-  const after = await (await relay.fetch(new Request('https://internal/usage?tests=1'))).json()
-  assert.equal(after.tests[0].status, 'stopped')
-  assert.deepEqual([after.tests[0].requests, after.tests[0].attempted.put], [2, 5])
-  assert.deepEqual([after.reports[0].requests, after.reports[0].attempted.put], [4, 11])
-  assert.equal((await post('/usage/session/reset', { media })).status, 204)
-  const cleared = await (await relay.fetch(new Request('https://internal/usage?tests=1'))).json()
-  assert.equal(cleared.tests.length, 0)
-  assert.equal(cleared.reports[0].attempted.put, 11)
-  assert.equal((await post('/usage/session/start', { media })).status, 204)
-  const next = await (await relay.fetch(new Request('https://internal/usage?tests=1'))).json()
-  assert.equal(next.tests[0].requests, 0)
-})
 
-test('Monitor session start/stop/reset routes require config token and never touch Workers KV', async () => {
-  const { default: worker, TranslationDeliveryRelay } = await import('../src/cloudflare-worker.mjs')
-  const secret = 'monitor-session-secret'
-  const token = createUserConfigToken('d'.repeat(35), { secret })
-  const instances = new Map()
-  let kvCalls = 0
-  const env = {
-    SMARTSUBS_SECRET: secret,
-    SMARTSUBS_CACHE: {
-      async get() { kvCalls++ }, async put() { kvCalls++ },
-      async list() { kvCalls++ }, async delete() { kvCalls++ }
-    },
-    SMARTSUBS_DELIVERY: {
-      idFromName(name) { return name },
-      get(id) {
-        if (!instances.has(id)) instances.set(id, new TranslationDeliveryRelay({ storage: mockStorage() }, {}))
-        return { fetch: (url, options) => instances.get(id).fetch(new Request(url, options)) }
-      }
-    }
-  }
-  const url = `https://smartsubs.test/c/${token}/kv-monitor`
-  const media = new URLSearchParams({ type: 'series', id: 'tt10986410:1:1' })
-  const post = (action, body = media, path = url) => worker.fetch(new Request(`${path}/session/${action}`, { method: 'POST', body }), env)
-  assert.equal((await post('start', media, 'https://smartsubs.test/c/bad/kv-monitor')).status, 401)
-  const started = await post('start')
-  assert.equal(started.status, 303)
-  assert.equal(new URL(started.headers.get('location')).searchParams.get('notice'), 'started')
-  const activeHtml = await (await worker.fetch(new Request(url), env)).text()
-  assert.match(activeHtml, /Ujian sedang berjalan/)
-  assert.match(activeHtml, /Tamatkan ujian/)
-  assert.match(activeHtml, /Jumlah episod \(semua ujian\)/)
-  assert.equal(new URL((await post('reset')).headers.get('location')).searchParams.get('notice'), 'invalid')
-  const invalidHtml = await (await worker.fetch(new Request(url), env)).text()
-  assert.match(invalidHtml, /Ujian sedang berjalan/)
-  const reset = new URLSearchParams({ type: 'series', id: 'tt10986410:1:1', confirm: 'RESET' })
-  assert.equal(new URL((await post('stop')).headers.get('location')).searchParams.get('notice'), 'stopped')
-  assert.equal(new URL((await post('reset', reset)).headers.get('location')).searchParams.get('notice'), 'reset')
-  const emptyHtml = await (await worker.fetch(new Request(url), env)).text()
-  assert.doesNotMatch(emptyHtml, /Ujian sedang berjalan/)
-  assert.equal(kvCalls, 0)
-})
-
-test('Old test sessions expire automatically and invalid media cannot be used', async () => {
-  const { controlMonitorTest, readMonitorTests, storeMonitorReport, renderKvMonitor } = await import('../src/kv-monitor.mjs')
-  const storage = mockStorage()
-  const media = { type: 'movie', id: 'tt123' }
-  const begin = Date.now() - 5 * 60 * 60 * 1000
-  assert.equal((await controlMonitorTest(storage, 'start', media, begin)).status, 204)
-  const expired = await readMonitorTests(storage)
-  assert.equal(expired[0].status, 'stopped')
-  assert.equal(expired[0].endedAt, begin + 4 * 60 * 60 * 1000)
-  assert.equal((await controlMonitorTest(storage, 'start', media)).status, 204)
-  assert.equal((await controlMonitorTest(storage, 'start', { type: 'series', id: '<script>' })).status, 400)
-  const html = renderKvMonitor([], await readMonitorTests(storage))
-  assert.match(html, /tt123/)
-  assert.doesNotMatch(html, /<script>/)
-  assert.match(html, /Reset laporan ujian/)
-  assert.match(html, /Ujian episod baharu/)
+test('English first-version UI preserves cumulative reports without manual session controls', async () => {
+  const { renderKvMonitor } = await import('../src/kv-monitor.mjs')
+  const html = renderKvMonitor([{ media: { type: 'series', id: 'tt123:2:8', season: 2, episode: 8 }, requests: 2, attempted: { get: 1, put: 4 }, categories: {}, phases: {}, last: Date.now() }])
+  assert.match(html, /Series · Season 2 · Episode 8/)
+  assert.match(html, /2 requests recorded/)
+  assert.match(html, /Cumulative KV operations/)
+  assert.doesNotMatch(html, /Mula ujian|Tamatkan ujian|kv-monitor\/session/)
 })
