@@ -186,3 +186,26 @@ test('ON page retains canonical Compact UI layout with its title inside the stat
   assert.match(html, /<summary>Technical events \(0\)<\/summary>/)
   assert.doesNotMatch(html, /<body><main class="wrap"><h1>SmartSubs Diagnose<\/h1>/)
 })
+
+
+test('ON displays compact one-tap OFF without admin input; OFF without key stops writes', async () => {
+  const { browse, toggle, translationToken, calls, adminKey } = await setup()
+  assert.equal((await toggle('on', 'invalid')).status, 403, 'ON still requires a valid key')
+  assert.equal((await toggle('on', adminKey)).status, 303)
+  const onPage = await (await browse('/diagnose')).text()
+  assert.match(onPage, /class="diag-control-row"/)
+  assert.match(onPage, /class="diag-off-btn"[^>]*name="action" value="off"/)
+  assert.doesNotMatch(onPage, /<input[^>]*name="adminKey"/)
+  assert.match(onPage, /<h2>Overview<\/h2>/, 'Compact UI overview is unchanged')
+  assert.equal((await browse(`/translated/${translationToken}.vtt`)).status, 200)
+  const beforeOff = calls.filter(([method]) => method === 'put').length
+  assert.ok(beforeOff > 0)
+  const off = await toggle('off', '')
+  assert.equal(off.status, 303, 'OFF does not require any admin key')
+  const offPage = await (await browse('/diagnose')).text()
+  assert.match(offPage, /Diagnostics:.*OFF/)
+  assert.match(offPage, /<input[^>]*name="adminKey"/)
+  assert.equal((await browse(`/translated/${translationToken}.vtt`)).status, 200)
+  assert.equal(calls.filter(([method]) => method === 'put').length, beforeOff, 'OFF prevents further diagnostics writes')
+  assert.equal((await toggle('on', '')).status, 403, 'ON is still protected')
+})
