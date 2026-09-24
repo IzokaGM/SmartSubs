@@ -229,7 +229,7 @@ test('M19 Queue retry records why next attempt was scheduled', async () => {
   await handleQueue({
     messages: [{
       body: {
-        configId: 'retry-config',
+        configId: '0123456789abcdef',
         cacheKey: '',
         v: 1
       },
@@ -239,7 +239,12 @@ test('M19 Queue retry records why next attempt was scheduled', async () => {
       }
     }]
   }, {
-    SMARTSUBS_CACHE: kv
+    SMARTSUBS_CACHE: kv,
+    SMARTSUBS_DIAG_ADMIN_KEY: 'retry-test-admin-key-very-long',
+    // This regression checks diagnostic retry payload when the owner enabled it.
+    SMARTSUBS_DELIVERY: { idFromName: name => name, get: () => ({
+      async fetch() { return new Response(JSON.stringify({ enabled: true, since: 0 })) }
+    }) }
   }, {
     processFn: async () => {
       throw new Error('Gemini HTTP 503')

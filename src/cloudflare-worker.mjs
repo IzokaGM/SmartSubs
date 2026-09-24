@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from 'node:crypto'
 import manifest from './manifest.js'
 import configuredManifestModule from './configured-manifest.js'
 import subtitlesModule from './subtitles.js'
@@ -20,6 +21,57 @@ const { recordDiagnostic, readDiagnostics, deriveVerdict } = diagnosticsModule
 
 const BUILD_ID = 'final-stable-m20r3'
 const caches = new WeakMap()
+// Per-request memoization only. No cross-request stale state when the owner switches OFF.
+const diagnosticStateByEnv = new WeakMap()
+
+async function diagnosticState(env, configId) {
+  if (!env || !diagnosticAdminReady(env) || !/^[a-f0-9]{16}$/.test(String(configId || ''))) return { enabled: false, since: 0 }
+  const fetchState = async () => {
+    const stub = monitorStub(env, configId)
+    if (!stub) return { enabled: false, since: 0 }
+    try {
+      const response = await stub.fetch('https://smartsubs-monitor.internal/diagnostics/state')
+      if (!response.ok) return { enabled: false, since: 0 }
+      const data = await response.json()
+      return { enabled: data.enabled === true, since: Number(data.since) || 0 }
+    } catch { return { enabled: false, since: 0 } } // fail closed; never disrupt playback
+  }
+  // The tracked environment is newly created for each live Worker/Queue invocation.
+  // Untracked direct calls are intentionally not cached across distinct invocations.
+  if (!env.__kvUsageTracker) return fetchState()
+  let byConfig = diagnosticStateByEnv.get(env)
+  if (!byConfig) { byConfig = new Map(); diagnosticStateByEnv.set(env, byConfig) }
+  if (!byConfig.has(configId)) byConfig.set(configId, fetchState())
+  return byConfig.get(configId)
+}
+
+async function recordConfiguredDiagnostic(env, configId, event) {
+  if (!(await diagnosticState(env, configId)).enabled) return false
+  return recordDiagnostic(env.SMARTSUBS_CACHE, configId, event)
+}
+
+function diagnosticAdminReady(env) {
+  return String(env?.SMARTSUBS_DIAG_ADMIN_KEY || '').length >= 20 && String(env?.SMARTSUBS_DIAG_ADMIN_KEY || '').length <= 256
+}
+
+function validDiagnosticAdminKey(submitted, stored) {
+  if (typeof submitted !== 'string' || submitted.length < 20 || submitted.length > 256 ||
+      typeof stored !== 'string' || stored.length < 20) return false
+  const a = createHash('sha256').update(submitted, 'utf8').digest()
+  const b = createHash('sha256').update(stored, 'utf8').digest()
+  return timingSafeEqual(a, b)
+}
+
+function diagnosticControlHtml(state = { enabled: false }, ready = false, error = '') {
+  const enabled = state.enabled === true
+  const heading = enabled ? 'ON' : 'OFF'
+  const notice = enabled
+    ? 'Diagnostic events are being recorded to Workers KV.'
+    : 'Diagnostic recording is OFF. Translation, Queue and cache still work normally.'
+  const button = `<button type="submit" name="action" value="${enabled ? 'off' : 'on'}"${ready ? '' : ' disabled'}>${enabled ? 'Turn OFF' : 'Turn ON'}</button>`
+  return `<section class="card"><h2>Diagnostics: <span class="pill ${enabled ? 'good' : 'neutral'}">${heading}</span></h2><p class="muted">${notice}</p><form method="POST" action="diagnose/toggle" autocomplete="off"><label for="diag-admin">Admin key</label><input id="diag-admin" name="adminKey" type="password" minlength="20" maxlength="256" required autocomplete="off" placeholder="Admin key (not Gemini API key)" ${ready ? '' : 'disabled'}><div>${button}</div></form>${!ready ? '<p class="muted">Set secret SMARTSUBS_DIAG_ADMIN_KEY (20+ characters) and ensure SMARTSUBS_DELIVERY is available.</p>' : ''}${error ? `<p class="bad-text">${escapeHtml(error)}</p>` : ''}</section>`
+}
+
 
 function responseHeaders(contentType, status = 200, options = {}) {
   const headers = new Headers({
@@ -367,7 +419,11 @@ function verdictPresentation(verdict) {
   return { title: item[0], tone: item[1], explanation: item[2] }
 }
 
-function renderConfiguredDiagnosePage(configId, events) {
+function renderConfiguredDiagnosePage(configId, events, control = { enabled: true, ready: false, error: '' }) {
+  const controls = diagnosticControlHtml(control, control.ready, control.error)
+  if (control.enabled === false) {
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>SmartSubs Diagnose</title><style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101116;color:#f4f4f5;font:16px system-ui,sans-serif}.wrap{max-width:720px;margin:auto;padding:18px 12px}.card{background:#181a21;border:1px solid #30333d;border-radius:16px;padding:16px;margin-bottom:12px}.muted{color:#aeb1bb;font-size:13px}.pill{display:inline-block;border-radius:999px;padding:5px 10px;background:#30333d;color:#eee}input{display:block;width:100%;max-width:430px;min-height:44px;margin:10px 0;padding:10px;background:#101116;color:#fff;border:1px solid #59606b;border-radius:8px}button{min-height:44px;padding:10px 18px;border:0;border-radius:9px;background:#3879d7;color:#fff;font-weight:bold}button:disabled{opacity:.5}.bad-text{color:#fecaca}</style></head><body><main class="wrap"><h1>SmartSubs Diagnose</h1>${controls}<p class="muted">Old events remain in KV until their existing 24-hour expiry. No diagnostic history is read while OFF.</p></main></body></html>`
+  }
   const sorted = [...events].sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))
   const verdict = deriveVerdict(sorted)
   const status = verdictPresentation(verdict)
@@ -429,10 +485,11 @@ function renderConfiguredDiagnosePage(configId, events) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SmartSubs Diagnose</title>
 <style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101116;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif}.wrap{max-width:920px;margin:auto;padding:18px 12px 40px}.card{background:#181a21;border:1px solid #30333d;border-radius:16px;padding:16px;margin-bottom:12px}h1{font-size:24px;margin:0 0 8px}h2{font-size:17px;margin:0 0 12px}.muted{color:#aeb1bb;font-size:13px}.status{display:flex;gap:10px;align-items:flex-start}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:5px 10px;font-weight:800;font-size:12px;letter-spacing:.02em}.good{background:#123b29;color:#a7f3d0}.warn{background:#493812;color:#fde68a}.bad{background:#4a1d24;color:#fecaca}.neutral{background:#30333d;color:#e5e7eb}.status-copy{flex:1}.status-title{font-size:20px;font-weight:800;margin-bottom:4px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{background:#111319;border:1px solid #2b2e37;border-radius:12px;padding:12px}.metric .label{color:#aeb1bb;font-size:12px}.metric .value{font-size:18px;font-weight:800;margin-top:3px;word-break:break-word}.metric .sub{color:#aeb1bb;font-size:12px;margin-top:4px;word-break:break-word}.candidate{display:grid;grid-template-columns:34px 1fr auto auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid #30333d;font-size:13px}.candidate:last-child{border-bottom:0}.candidate.selected{background:#16271e}.candidate em{font-style:normal;font-size:10px;font-weight:800;color:#a7f3d0}.meta-row{display:grid;grid-template-columns:90px 42px 1fr;gap:8px;padding:8px 0;border-bottom:1px solid #30333d;align-items:start}.meta-row:last-child{border-bottom:0}.meta-row .yes{color:#a7f3d0}.meta-row .no{color:#fca5a5}.meta-row small{color:#c7c9d1;word-break:break-word}.guide{font-size:15px;line-height:1.5}.event-card{border-top:1px solid #30333d;padding:12px 0}.event-card:first-child{border-top:0}.event-head{display:flex;gap:10px;justify-content:space-between;align-items:center;margin-bottom:7px}.event-head time{font-size:12px;color:#aeb1bb}.event-head code{font-size:12px;color:#c9ffdc}.event-detail{display:flex;flex-wrap:wrap;gap:6px}.event-detail span{background:#111319;border-radius:7px;padding:4px 6px;font-size:11px;word-break:break-word}.event-detail b{color:#aeb1bb;font-weight:600}details summary{cursor:pointer;font-weight:800;padding:4px 0}code{color:#c9ffdc}@media(max-width:640px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.metric:first-child{grid-column:1/-1}.candidate{grid-template-columns:28px 1fr auto}.candidate em{grid-column:2}.meta-row{grid-template-columns:82px 38px 1fr}.event-head{align-items:flex-start;flex-direction:column;gap:4px}}
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101116;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif}.wrap{max-width:920px;margin:auto;padding:18px 12px 40px}.card{background:#181a21;border:1px solid #30333d;border-radius:16px;padding:16px;margin-bottom:12px}h1{font-size:24px;margin:0 0 8px}h2{font-size:17px;margin:0 0 12px}.muted{color:#aeb1bb;font-size:13px}.status{display:flex;gap:10px;align-items:flex-start}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:5px 10px;font-weight:800;font-size:12px;letter-spacing:.02em}.good{background:#123b29;color:#a7f3d0}.warn{background:#493812;color:#fde68a}.bad{background:#4a1d24;color:#fecaca}.neutral{background:#30333d;color:#e5e7eb}.status-copy{flex:1}.status-title{font-size:20px;font-weight:800;margin-bottom:4px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{background:#111319;border:1px solid #2b2e37;border-radius:12px;padding:12px}.metric .label{color:#aeb1bb;font-size:12px}.metric .value{font-size:18px;font-weight:800;margin-top:3px;word-break:break-word}.metric .sub{color:#aeb1bb;font-size:12px;margin-top:4px;word-break:break-word}.candidate{display:grid;grid-template-columns:34px 1fr auto auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid #30333d;font-size:13px}.candidate:last-child{border-bottom:0}.candidate.selected{background:#16271e}.candidate em{font-style:normal;font-size:10px;font-weight:800;color:#a7f3d0}.meta-row{display:grid;grid-template-columns:90px 42px 1fr;gap:8px;padding:8px 0;border-bottom:1px solid #30333d;align-items:start}.meta-row:last-child{border-bottom:0}.meta-row .yes{color:#a7f3d0}.meta-row .no{color:#fca5a5}.meta-row small{color:#c7c9d1;word-break:break-word}.guide{font-size:15px;line-height:1.5}.event-card{border-top:1px solid #30333d;padding:12px 0}.event-card:first-child{border-top:0}.event-head{display:flex;gap:10px;justify-content:space-between;align-items:center;margin-bottom:7px}.event-head time{font-size:12px;color:#aeb1bb}.event-head code{font-size:12px;color:#c9ffdc}.event-detail{display:flex;flex-wrap:wrap;gap:6px}.event-detail span{background:#111319;border-radius:7px;padding:4px 6px;font-size:11px;word-break:break-word}.event-detail b{color:#aeb1bb;font-weight:600}details summary{cursor:pointer;font-weight:800;padding:4px 0}code{color:#c9ffdc}input{display:block;width:100%;max-width:430px;min-height:44px;margin:10px 0;padding:10px;background:#101116;color:#fff;border:1px solid #59606b;border-radius:8px}button{min-height:44px;padding:10px 18px;border:0;border-radius:9px;background:#3879d7;color:#fff;font-weight:bold}button:disabled{opacity:.5}.bad-text{color:#fecaca}@media(max-width:640px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.metric:first-child{grid-column:1/-1}.candidate{grid-template-columns:28px 1fr auto}.candidate em{grid-column:2}.meta-row{grid-template-columns:82px 38px 1fr}.event-head{align-items:flex-start;flex-direction:column;gap:4px}}
 </style></head>
-<body><main class="wrap">
-<section class="card"><h1>SmartSubs Diagnose</h1><div class="status"><span class="pill ${status.tone}">${escapeHtml(status.tone === 'good' ? 'OK' : status.tone === 'bad' ? 'ERROR' : status.tone === 'warn' ? 'WAIT' : 'INFO')}</span><div class="status-copy"><div class="status-title">${escapeHtml(status.title)}</div><div class="muted">${escapeHtml(status.explanation)}</div></div></div><p class="muted">${escapeHtml(lastSubtitle ? formatMalaysiaTime(lastSubtitle.ts) : 'Waiting for subtitle request')} | MYT</p></section>
+<body><main class="wrap"><h1>SmartSubs Diagnose</h1>
+${controls}
+<section class="card"><div class="status"><span class="pill ${status.tone}">${escapeHtml(status.tone === 'good' ? 'OK' : status.tone === 'bad' ? 'ERROR' : status.tone === 'warn' ? 'WAIT' : 'INFO')}</span><div class="status-copy"><div class="status-title">${escapeHtml(status.title)}</div><div class="muted">${escapeHtml(status.explanation)}</div></div></div><p class="muted">${escapeHtml(lastSubtitle ? formatMalaysiaTime(lastSubtitle.ts) : 'Waiting for subtitle request')} | MYT</p></section>
 
 <section class="card"><h2>Overview</h2><div class="grid">
 <div class="metric"><div class="label">Latest media</div><div class="value">${escapeHtml(lastSubtitle ? `${lastSubtitle.type || ''} ${lastSubtitle.id || ''}`.trim() : 'No request')}</div></div>
@@ -459,7 +516,7 @@ async function prefetchTranslation(options = {}) {
   const secret = String(options.secret || '')
   const configId = String(options.configId || '')
   const getOrTranslateFn = options.getOrTranslateFn || cfGetOrTranslate
-  const diagnosticFn = options.diagnosticFn || recordDiagnostic
+  const diagnosticFn = options.diagnosticFn || ((_kv, id, event) => recordConfiguredDiagnostic(env, id, event))
   const startedAt = nowMs()
 
   if (!autoUrl || !secret || !userConfig.apiKey) return null
@@ -665,6 +722,29 @@ export class TranslationDeliveryRelay {
         headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
       })
     }
+    // This endpoint is reachable only from the Worker through the DO binding.
+    // Never expose a public proxy for arbitrary DO paths.
+    if (path === '/diagnostics/state' && request.method === 'GET') {
+      const state = await this.ctx.storage.get('diagnostics:state')
+      return new Response(JSON.stringify({
+        enabled: state?.enabled === true,
+        since: Number(state?.since) || 0
+      }), { headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } })
+    }
+    if (path === '/diagnostics/state' && request.method === 'POST') {
+      let payload
+      try { payload = await request.json() } catch { return new Response(null, { status: 400 }) }
+      if (payload?.enabled !== true && payload?.enabled !== false) return new Response(null, { status: 400 })
+      const previous = await this.ctx.storage.get('diagnostics:state')
+      const enabled = payload.enabled === true
+      const since = enabled ? (previous?.enabled ? Number(previous.since) || Date.now() : Date.now()) : 0
+      await this.ctx.storage.put('diagnostics:state', { enabled, since })
+      return new Response(JSON.stringify({ enabled, since }), {
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+      })
+    }
+    if (path === '/diagnostics/state') return new Response(null, { status: 405 })
+
     if (request.method === 'PUT') {
       const value = await request.text()
       if (!value.startsWith('WEBVTT') || value.length > 2 * 1024 * 1024) {
@@ -697,7 +777,7 @@ export class TranslationDeliveryRelay {
     const hasTests = await pruneMonitorTestHistory(this.ctx.storage)
     const remaining = await this.ctx.storage.list({ prefix: 'usage:', limit: 1 })
     if (remaining.size || hasTests) await this.ctx.storage.setAlarm(Date.now() + 86400000)
-    else await this.ctx.storage.deleteAll()
+    else if ((await this.ctx.storage.get('diagnostics:state'))?.enabled !== true) await this.ctx.storage.deleteAll()
   }
 }
 
@@ -972,7 +1052,7 @@ async function enqueuePrefetchTranslation(options = {}) {
   const env = options.env || {}
   const configToken = String(options.configToken || '')
   const configId = String(options.configId || '')
-  const diagnosticFn = options.diagnosticFn || recordDiagnostic
+  const diagnosticFn = options.diagnosticFn || ((_kv, id, event) => recordConfiguredDiagnostic(env, id, event))
   const translationToken = parseAutoTranslationToken(autoUrl)
   const cacheKey = String(options.cacheKey || '')
   const requestedProfile = normaliseRequestedQueueProfile(options.queueProfile)
@@ -1058,7 +1138,7 @@ async function processQueueMessage(body, env, options = {}) {
   const configId = String(payload.configId || '')
   env.__kvUsageTracker?.setConfigId(configId)
   const attempts = Math.max(1, Number(options.attempts || 1))
-  const diagnosticFn = options.diagnosticFn || recordDiagnostic
+  const diagnosticFn = options.diagnosticFn || ((_kv, id, event) => recordConfiguredDiagnostic(env, id, event))
   const getOrTranslateFn = options.getOrTranslateFn || cfGetOrTranslate
   const startedAt = nowMs()
   const epochNowFn = typeof options.epochNowFn === 'function' ? options.epochNowFn : Date.now
@@ -1243,7 +1323,7 @@ async function handleQueue(batch, env, options = {}) {
             attempts: message.attempts
           }).catch(() => {})
         }
-        await recordDiagnostic(messageEnv.SMARTSUBS_CACHE, configId, {
+        await recordConfiguredDiagnostic(messageEnv, configId, {
           event: 'queue-retry-stopped',
           status: 'permanent',
           attempts: message.attempts,
@@ -1261,7 +1341,7 @@ async function handleQueue(batch, env, options = {}) {
           }).catch(() => {})
         }
         const retryDelaySeconds = Math.min(60, attempts * 10)
-        await recordDiagnostic(messageEnv.SMARTSUBS_CACHE, configId, {
+        await recordConfiguredDiagnostic(messageEnv, configId, {
           event: 'queue-retry-scheduled',
           status: 'retrying',
           attempts,
@@ -1344,14 +1424,56 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
   }
 
   if (request.method === 'GET' && suffix === '/diagnose') {
-    const events = await readDiagnostics(env.SMARTSUBS_CACHE, configId).catch(() => [])
-    return send(200, 'text/html; charset=utf-8', renderConfiguredDiagnosePage(configId, events), { noStore: true, csp: true })
+    const state = await diagnosticState(env, configId)
+    const events = state.enabled
+      ? (await readDiagnostics(env.SMARTSUBS_CACHE, configId).catch(() => [])).filter(item => Number(item.ts) >= state.since)
+      : []
+    return send(200, 'text/html; charset=utf-8', renderConfiguredDiagnosePage(configId, events, {
+      ...state, ready: diagnosticAdminReady(env) && Boolean(monitorStub(env, configId))
+    }), { noStore: true, csp: true, headers: { 'x-robots-tag': 'noindex, nofollow' } })
+  }
+
+  if (request.method === 'POST' && suffix === '/diagnose/toggle') {
+    // A configured addon URL is shared with the player, and is NOT admin authentication.
+    // Only the separate Cloudflare secret can authorise mutations.
+    const adminKey = String(env.SMARTSUBS_DIAG_ADMIN_KEY || '')
+    if (!diagnosticAdminReady(env)) return send(503, 'text/plain; charset=utf-8', 'Diagnostic admin key is not configured', { noStore: true })
+    const origin = request.headers.get('origin')
+    const site = request.headers.get('sec-fetch-site')
+    if ((origin && origin !== new URL(request.url).origin) ||
+        (site && !['same-origin', 'none'].includes(site))) {
+      return send(403, 'text/plain; charset=utf-8', 'Forbidden', { noStore: true })
+    }
+    if (Number(request.headers.get('content-length') || 0) > 2048) return send(413, 'text/plain; charset=utf-8', 'Form too large', { noStore: true })
+    let form
+    try {
+      if (!String(request.headers.get('content-type') || '').startsWith('application/x-www-form-urlencoded')) throw new Error('Unsupported form')
+      const text = await request.text()
+      if (text.length > 2048) throw new Error('Form too large')
+      form = new URLSearchParams(text)
+    } catch { return send(400, 'text/plain; charset=utf-8', 'Invalid form', { noStore: true }) }
+    const action = form.get('action')
+    if (!['on', 'off'].includes(action) || !validDiagnosticAdminKey(form.get('adminKey'), adminKey)) {
+      return send(403, 'text/plain; charset=utf-8', 'Invalid admin key or action', { noStore: true })
+    }
+    const stub = monitorStub(env, configId)
+    if (!stub) return send(503, 'text/plain; charset=utf-8', 'Diagnostics switch requires SMARTSUBS_DELIVERY', { noStore: true })
+    try {
+      const response = await stub.fetch('https://smartsubs-monitor.internal/diagnostics/state', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: action === 'on' })
+      })
+      if (!response.ok) throw new Error('State update failed')
+    } catch { return send(503, 'text/plain; charset=utf-8', 'Diagnostics switch unavailable. Try again.', { noStore: true }) }
+    return new Response(null, { status: 303, headers: {
+      location: new URL(request.url).pathname.replace(/\/toggle$/, ''),
+      'cache-control': 'no-store', 'referrer-policy': 'no-referrer'
+    } })
   }
 
   const translationMatch = request.method === 'GET' && suffix.match(/^\/translated\/([A-Za-z0-9_.-]+)\.vtt$/)
   if (translationMatch) {
     const startedAt = nowMs()
-    await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+    await recordConfiguredDiagnostic(env, configId, {
       event: 'translation-request',
       status: 'player'
     }).catch(() => {})
@@ -1382,7 +1504,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
       } else {
         const job = await readQueueJobState(env, cacheKey)
         if (queueJobActive(job)) {
-          await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+          await recordConfiguredDiagnostic(env, configId, {
             event: 'queue-join-start',
             status: job.state
           }).catch(() => {})
@@ -1409,7 +1531,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
               status: joined.cacheSource === 'DELIVERY_RELAY' ? 'DELIVERY_RELAY' : 'QUEUE_JOIN',
               translationStats: null
             }
-            await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+            await recordConfiguredDiagnostic(env, configId, {
               event: 'queue-join-hit',
               status: joined.jobStatus,
               waitMs: joinWaitMs,
@@ -1418,7 +1540,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
               graceHit: joinGraceHit
             }).catch(() => {})
             if (joinGraceHit) {
-              await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+              await recordConfiguredDiagnostic(env, configId, {
                 event: 'queue-grace-hit',
                 status: joined.jobStatus,
                 waitMs: joinWaitMs,
@@ -1426,7 +1548,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
               }).catch(() => {})
             }
           } else if (joined.outcome !== 'failed') {
-            await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+            await recordConfiguredDiagnostic(env, configId, {
               event: 'translation-pending',
               status: joined.jobStatus,
               waitMs: joinWaitMs,
@@ -1456,7 +1578,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
         })
 
         if (queued) {
-          await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+          await recordConfiguredDiagnostic(env, configId, {
             event: 'player-translation-queued',
             status: 'queued'
           }).catch(() => {})
@@ -1479,7 +1601,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
 
           if (joined.vtt) {
             if (joinGraceHit) {
-              await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+              await recordConfiguredDiagnostic(env, configId, {
                 event: 'queue-grace-hit',
                 status: joined.jobStatus || 'queued',
                 waitMs: joinWaitMs,
@@ -1493,7 +1615,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
               translationStats: null
             }
           } else if (joined.outcome !== 'failed') {
-            await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+            await recordConfiguredDiagnostic(env, configId, {
               event: 'translation-pending',
               status: joined.jobStatus || 'queued',
               waitMs: joinWaitMs,
@@ -1531,7 +1653,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
       })
 
       const repair = result.translationStats || {}
-      await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+      await recordConfiguredDiagnostic(env, configId, {
         event: 'translation-delivered',
         cache: result.status,
         totalMs,
@@ -1572,7 +1694,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
         message: safeMessage(error, userConfig.apiKey)
       }))
       const classified = classifyTranslationError(error)
-      await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+      await recordConfiguredDiagnostic(env, configId, {
         event: 'translation-failed',
         status: classified.code,
         error: safeMessage(error, userConfig.apiKey),
@@ -1601,7 +1723,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
         return rateLimitedResponse('subtitle')
       }
 
-      await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+      await recordConfiguredDiagnostic(env, configId, {
         event: 'subtitle-request',
         type: args.type,
         id: args.id
@@ -1614,7 +1736,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
         publicBaseUrl: configuredBase(request, token),
         tokenSecret: secret,
         media: { type: args.type, id: args.id },
-        onDiagnostic: event => recordDiagnostic(env.SMARTSUBS_CACHE, configId, event)
+        onDiagnostic: event => recordConfiguredDiagnostic(env, configId, event)
       })
 
       const autoUrl = result?.subtitles?.find(item =>
@@ -1622,7 +1744,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
       )?.url
 
       if (autoUrl && result?.autoPrefetch === false) {
-        await recordDiagnostic(env.SMARTSUBS_CACHE, configId, {
+        await recordConfiguredDiagnostic(env, configId, {
           event: 'auto-prefetch-skipped',
           status: 'quota-protected',
           reason: result.autoPrefetchReason || 'user-selection-required'

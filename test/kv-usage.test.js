@@ -70,7 +70,12 @@ test('real Worker cached playback is attributed to episode; repeated playback pr
     async delete(k) { calls.push(['delete', k]) }
   }
   const path = `https://smartsubs.test/c/${configToken}/translated/${token}.vtt`
-  const env = { SMARTSUBS_SECRET: secret, SMARTSUBS_CACHE: kv }
+  // Keep this pre-existing cached-playback test in ON mode.
+  const env = { SMARTSUBS_SECRET: secret, SMARTSUBS_DIAG_ADMIN_KEY: 'usage-test-admin-key-very-long', SMARTSUBS_CACHE: kv,
+    SMARTSUBS_DELIVERY: { idFromName(name) { return name }, get() { return {
+      async fetch() { return new Response(JSON.stringify({ enabled: true, since: 0 }), { headers: { 'content-type': 'application/json' } }) }
+    } } }
+  }
   const logs = []
   const original = console.log
   console.log = line => { if (line.includes('SMARTSUBS_KV_USAGE')) logs.push(JSON.parse(line)) }
@@ -118,7 +123,7 @@ test('queue usage is flushed separately for each message, including retry-path w
   assert.equal(logs.length, 1)
   assert.equal(logs[0].phase, 'queue')
   assert.equal(logs[0].attempt, 2)
-  assert.equal(logs[0].attempted.put, 3) // Diagnostic, retry state, retry diagnostic.
+  assert.equal(logs[0].attempted.put, 2) // OFF by default: direct test write + retry state, no retry diagnostic.
   assert.equal(logs[0].mediaKnown, false) // Legacy/unidentifiable input must not be guessed.
-  assert.equal(calls.length, 3)
+  assert.equal(calls.length, 2)
 })

@@ -72,7 +72,7 @@ test('English-only OpenSubtitles result returns Malay Auto and built-in English 
     })
     assert.equal(diagnose.status, 200)
     const html = await diagnose.text()
-    assert.match(html, /SUBTITLE_RETURNED_WAITING_FOR_PLAYER_SELECTION/)
+    assert.match(html, /Diagnostics:.*OFF/)
   } finally {
     global.fetch = originalFetch
   }
