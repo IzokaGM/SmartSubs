@@ -440,7 +440,15 @@ async function translateCues(cues, options = {}) {
             if (!aborted || abortRetriesForChunk >= 1) throw error
 
             abortRetriesForChunk++
-            const waitMs = Math.max(0, Math.min(1000, Number(options.abortRetryDelayMs ?? 100)))
+            // An aborted call may indicate Gemini is slow/overloaded. Retrying
+            // the same chunk after 100ms creates another request too soon.
+            // Use 2–5s jitter by default; retain an explicit delay for tests
+            // and deployments that deliberately override this setting.
+            const waitMs = options.abortRetryDelayMs === undefined
+              ? 2000 + Math.floor(
+                Math.min(1, Math.max(0, Number((options.jitterFn || Math.random)()) || 0)) * 3000
+              )
+              : Math.max(0, Math.min(15000, Number(options.abortRetryDelayMs) || 0))
 
             requestMetrics.abortRetries = Number(requestMetrics.abortRetries || 0) + 1
             requestMetrics.transientRetries = Number(requestMetrics.transientRetries || 0) + 1
