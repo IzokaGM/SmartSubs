@@ -316,9 +316,9 @@ function syncAssessment(lastSubtitle) {
 
   if (candidates > 1 && gap !== null && gap <= 5 && !lastSubtitle.sourceVideoSizeProvided) {
     return {
-      level: 'HIGH RISK',
-      tone: 'bad',
-      reason: `Top English candidates are almost tied${gap !== null ? ` by only ${gap} point${gap === 1 ? '' : 's'}` : ''}, with no video hash or size. Sync may depend heavily on OpenSubtitles ordering.`
+      level: 'UNVERIFIED',
+      tone: 'warn',
+      reason: 'No hash or video size was provided, and the source scores are close. This does not prove the subtitle is out of sync; check timing in the player if needed.'
     }
   }
 
@@ -380,7 +380,6 @@ function renderConfiguredDiagnosePage(configId, events) {
   const lastFailure = sorted.find(item =>
     ['translation-failed', 'queue-translation-failed', 'prefetch-failed'].includes(item.event)
   ) || null
-  const latest = sorted[0] || null
   const sync = syncAssessment(lastSubtitle)
   const ranked = parseEnglishTop(lastSubtitle?.englishTop)
   const selectedId = lastSubtitle?.englishSelectedId || 'Not available'
@@ -391,12 +390,8 @@ function renderConfiguredDiagnosePage(configId, events) {
   const cacheStatus = cacheEvent?.cache || 'Not seen yet'
   const cacheTime = cacheEvent?.totalMs
   const coldTime = lastTranslationComplete?.totalMs
-  const pipelineTime = lastTranslationComplete?.pipelineMs
-  const wallTime = lastTranslationComplete?.translationWallMs
-  const nativeConfidence = lastSubtitle?.nativeConfidence || (Number(lastSubtitle?.malayCount || 0) > 0 ? 'UNKNOWN' : 'NONE')
-  const nativeDecision = lastSubtitle?.nativeDecision || 'Not applicable'
-  const nativeId = lastSubtitle?.malaySelectedId || 'Not available'
-  const nativeScore = Number(lastSubtitle?.malaySelectedScore)
+  const hasNativeMalay = Number(lastSubtitle?.malayCount || 0) > 0
+  const activeFailure = lastFailure && (!lastDelivery || Number(lastFailure.ts || 0) > Number(lastDelivery.ts || 0)) ? lastFailure : null
 
   const topCandidates = ranked.length
     ? ranked.map(item => {
@@ -414,19 +409,13 @@ function renderConfiguredDiagnosePage(configId, events) {
     `<div class="meta-row"><span>${escapeHtml(label)}</span><strong class="${available ? 'yes' : 'no'}">${available ? 'YES' : 'NO'}</strong><small>${escapeHtml(detail)}</small></div>`
   ).join('')
 
-  let guidance = 'Run a title and refresh this page after the subtitle list appears.'
-  if (lastSubtitle) {
-    if (lastSubtitle.nativeDecision === 'dual-fallback') {
-      guidance = 'Native Malay sync evidence is weak. Try Native Malay first. Malay Auto is available as a fallback, and Gemini translation starts only if you select Malay Auto.'
-    } else if (sync.tone === 'bad') {
-      guidance = `English source sync is uncertain. Selected source ${selectedId} should be compared with a known synced OpenSubtitles track before changing Gemini settings.`
-    } else if (lastFailure) {
-      guidance = `A recent failure was recorded at ${escapeHtml(lastFailure.failureStage || lastFailure.event)}. Check the failure card and raw events.`
-    } else if (lastDelivery?.cache === 'HIT') {
-      guidance = 'Subtitle delivery is healthy and came from cache. Any timing problem is more likely source selection than translation speed.'
-    } else if (status.tone === 'good') {
-      guidance = 'Delivery looks healthy. If subtitles are out of sync, focus on the English source ID and sync confidence section.'
-    }
+  let guidance = ''
+  if (activeFailure) {
+    guidance = 'A recent failure was recorded. See the failure details and recent events below.'
+  } else if (lastSubtitle?.nativeDecision === 'dual-fallback') {
+    guidance = 'Native Malay and Malay Auto are both available. Choose a track in your player.'
+  } else if (lastSubtitle && sync.level === 'UNVERIFIED') {
+    guidance = 'Source match could not be verified from player metadata. If timing is off, compare the selected English track against your video release.'
   }
 
   const rawEvents = sorted.map(item => {
@@ -440,32 +429,27 @@ function renderConfiguredDiagnosePage(configId, events) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SmartSubs Diagnose</title>
 <style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101116;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif}.wrap{max-width:920px;margin:auto;padding:18px 12px 40px}.card{background:#181a21;border:1px solid #30333d;border-radius:16px;padding:16px;margin-bottom:12px}h1{font-size:24px;margin:0 0 8px}h2{font-size:17px;margin:0 0 12px}.muted{color:#aeb1bb;font-size:13px}.status{display:flex;gap:10px;align-items:flex-start}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:5px 10px;font-weight:800;font-size:12px;letter-spacing:.02em}.good{background:#123b29;color:#a7f3d0}.warn{background:#493812;color:#fde68a}.bad{background:#4a1d24;color:#fecaca}.neutral{background:#30333d;color:#e5e7eb}.status-copy{flex:1}.status-title{font-size:20px;font-weight:800;margin-bottom:4px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{background:#111319;border:1px solid #2b2e37;border-radius:12px;padding:12px}.metric .label{color:#aeb1bb;font-size:12px}.metric .value{font-size:18px;font-weight:800;margin-top:3px;word-break:break-word}.metric .sub{color:#aeb1bb;font-size:12px;margin-top:4px;word-break:break-word}.candidate{display:grid;grid-template-columns:34px 1fr auto auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid #30333d;font-size:13px}.candidate:last-child{border-bottom:0}.candidate.selected{background:#16271e}.candidate em{font-style:normal;font-size:10px;font-weight:800;color:#a7f3d0}.meta-row{display:grid;grid-template-columns:90px 42px 1fr;gap:8px;padding:8px 0;border-bottom:1px solid #30333d;align-items:start}.meta-row:last-child{border-bottom:0}.meta-row .yes{color:#a7f3d0}.meta-row .no{color:#fca5a5}.meta-row small{color:#c7c9d1;word-break:break-word}.guide{font-size:15px;line-height:1.5}.event-card{border-top:1px solid #30333d;padding:12px 0}.event-card:first-child{border-top:0}.event-head{display:flex;gap:10px;justify-content:space-between;align-items:center;margin-bottom:7px}.event-head time{font-size:12px;color:#aeb1bb}.event-head code{font-size:12px;color:#c9ffdc}.event-detail{display:flex;flex-wrap:wrap;gap:6px}.event-detail span{background:#111319;border-radius:7px;padding:4px 6px;font-size:11px;word-break:break-word}.event-detail b{color:#aeb1bb;font-weight:600}details summary{cursor:pointer;font-weight:800;padding:4px 0}code{color:#c9ffdc}@media(max-width:640px){.grid{grid-template-columns:1fr}.candidate{grid-template-columns:28px 1fr auto}.candidate em{grid-column:2}.meta-row{grid-template-columns:82px 38px 1fr}.event-head{align-items:flex-start;flex-direction:column;gap:4px}}
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101116;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif}.wrap{max-width:920px;margin:auto;padding:18px 12px 40px}.card{background:#181a21;border:1px solid #30333d;border-radius:16px;padding:16px;margin-bottom:12px}h1{font-size:24px;margin:0 0 8px}h2{font-size:17px;margin:0 0 12px}.muted{color:#aeb1bb;font-size:13px}.status{display:flex;gap:10px;align-items:flex-start}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:5px 10px;font-weight:800;font-size:12px;letter-spacing:.02em}.good{background:#123b29;color:#a7f3d0}.warn{background:#493812;color:#fde68a}.bad{background:#4a1d24;color:#fecaca}.neutral{background:#30333d;color:#e5e7eb}.status-copy{flex:1}.status-title{font-size:20px;font-weight:800;margin-bottom:4px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{background:#111319;border:1px solid #2b2e37;border-radius:12px;padding:12px}.metric .label{color:#aeb1bb;font-size:12px}.metric .value{font-size:18px;font-weight:800;margin-top:3px;word-break:break-word}.metric .sub{color:#aeb1bb;font-size:12px;margin-top:4px;word-break:break-word}.candidate{display:grid;grid-template-columns:34px 1fr auto auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid #30333d;font-size:13px}.candidate:last-child{border-bottom:0}.candidate.selected{background:#16271e}.candidate em{font-style:normal;font-size:10px;font-weight:800;color:#a7f3d0}.meta-row{display:grid;grid-template-columns:90px 42px 1fr;gap:8px;padding:8px 0;border-bottom:1px solid #30333d;align-items:start}.meta-row:last-child{border-bottom:0}.meta-row .yes{color:#a7f3d0}.meta-row .no{color:#fca5a5}.meta-row small{color:#c7c9d1;word-break:break-word}.guide{font-size:15px;line-height:1.5}.event-card{border-top:1px solid #30333d;padding:12px 0}.event-card:first-child{border-top:0}.event-head{display:flex;gap:10px;justify-content:space-between;align-items:center;margin-bottom:7px}.event-head time{font-size:12px;color:#aeb1bb}.event-head code{font-size:12px;color:#c9ffdc}.event-detail{display:flex;flex-wrap:wrap;gap:6px}.event-detail span{background:#111319;border-radius:7px;padding:4px 6px;font-size:11px;word-break:break-word}.event-detail b{color:#aeb1bb;font-weight:600}details summary{cursor:pointer;font-weight:800;padding:4px 0}code{color:#c9ffdc}@media(max-width:640px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.metric:first-child{grid-column:1/-1}.candidate{grid-template-columns:28px 1fr auto}.candidate em{grid-column:2}.meta-row{grid-template-columns:82px 38px 1fr}.event-head{align-items:flex-start;flex-direction:column;gap:4px}}
 </style></head>
 <body><main class="wrap">
-<section class="card"><h1>SmartSubs Diagnose</h1><div class="status"><span class="pill ${status.tone}">${escapeHtml(status.tone === 'good' ? 'OK' : status.tone === 'bad' ? 'PROBLEM' : status.tone === 'warn' ? 'CHECK' : 'INFO')}</span><div class="status-copy"><div class="status-title">${escapeHtml(status.title)}</div><div class="muted">${escapeHtml(status.explanation)}</div><div class="muted">Verdict code: <code>${escapeHtml(verdict)}</code></div></div></div><p class="muted">Malaysia time (MYT, Asia/Kuala_Lumpur) | Build ${BUILD_ID} | ${sorted.length} events retained for up to 24 hours.</p></section>
+<section class="card"><h1>SmartSubs Diagnose</h1><div class="status"><span class="pill ${status.tone}">${escapeHtml(status.tone === 'good' ? 'OK' : status.tone === 'bad' ? 'ERROR' : status.tone === 'warn' ? 'WAIT' : 'INFO')}</span><div class="status-copy"><div class="status-title">${escapeHtml(status.title)}</div><div class="muted">${escapeHtml(status.explanation)}</div></div></div><p class="muted">${escapeHtml(lastSubtitle ? formatMalaysiaTime(lastSubtitle.ts) : 'Waiting for subtitle request')} | MYT</p></section>
 
-<section class="card"><h2>Quick diagnosis</h2><div class="grid">
-<div class="metric"><div class="label">Latest media</div><div class="value">${escapeHtml(lastSubtitle ? `${lastSubtitle.type || ''} ${lastSubtitle.id || ''}`.trim() : 'No request')}</div><div class="sub">${escapeHtml(lastSubtitle ? formatMalaysiaTime(lastSubtitle.ts) : 'Waiting for player')}</div></div>
-<div class="metric"><div class="label">Subtitle result</div><div class="value">${escapeHtml(lastSubtitle?.result || 'Not available')}</div><div class="sub">${escapeHtml(lastSubtitle ? `${lastSubtitle.subtitleCount || 0} returned | ${lastSubtitle.languages || 'language unknown'}` : '')}</div></div>
-<div class="metric"><div class="label">Native Malay decision</div><div class="value">${escapeHtml(nativeDecision)}</div><div class="sub">source ${escapeHtml(nativeId)} | confidence ${escapeHtml(nativeConfidence)}${Number.isFinite(nativeScore) ? ` | score ${escapeHtml(nativeScore)}` : ''}</div></div>
-<div class="metric"><div class="label">Selected English source</div><div class="value">${escapeHtml(selectedId)}</div><div class="sub">${Number.isFinite(topScore) ? `score ${escapeHtml(topScore)}` : 'score unavailable'} | ${candidateCount} candidates</div></div>
-<div class="metric"><div class="label">Sync confidence</div><div class="value"><span class="pill ${sync.tone}">${escapeHtml(sync.level)}</span></div><div class="sub">${escapeHtml(sync.reason)}</div></div>
-<div class="metric"><div class="label">Latest delivery cache</div><div class="value">${escapeHtml(cacheStatus)}</div><div class="sub">${cacheTime !== undefined ? formatDuration(cacheTime) : 'No delivery timing yet'}</div></div>
-<div class="metric"><div class="label">Cold translation</div><div class="value">${coldTime !== undefined ? formatDuration(coldTime) : 'Not seen yet'}</div><div class="sub">${pipelineTime !== undefined ? `pipeline ${formatDuration(pipelineTime)}` : ''}${wallTime !== undefined ? ` | Gemini wall ${formatDuration(wallTime)}` : ''}</div></div>
+<section class="card"><h2>Overview</h2><div class="grid">
+<div class="metric"><div class="label">Latest media</div><div class="value">${escapeHtml(lastSubtitle ? `${lastSubtitle.type || ''} ${lastSubtitle.id || ''}`.trim() : 'No request')}</div></div>
+<div class="metric"><div class="label">Malay Auto</div><div class="value">${escapeHtml(lastSubtitle?.result || 'Not requested')}</div><div class="sub">${escapeHtml(lastSubtitle ? `${lastSubtitle.subtitleCount || 0} tracks returned` : '')}</div></div>
+${selectedId !== 'Not available' ? `<div class="metric"><div class="label">Selected English source</div><div class="value">${escapeHtml(selectedId)}</div></div>` : ''}
+${lastDelivery ? `<div class="metric"><div class="label">Delivery</div><div class="value">${escapeHtml(cacheStatus)}</div><div class="sub">${cacheTime !== undefined ? formatDuration(cacheTime) : 'Timing unavailable'}</div></div>` : ''}
+${coldTime !== undefined ? `<div class="metric"><div class="label">Cold translation</div><div class="value">${formatDuration(coldTime)}</div></div>` : ''}
+${hasNativeMalay ? `<div class="metric"><div class="label">Native Malay</div><div class="value">${escapeHtml(lastSubtitle?.nativeDecision || 'Available')}</div></div>` : ''}
 </div></section>
 
-<section class="card"><h2>What this means</h2><div class="guide">${escapeHtml(guidance)}</div></section>
+${guidance ? `<section class="card"><h2>Note</h2><div class="guide">${escapeHtml(guidance)}</div></section>` : ''}
 
-<section class="card"><h2>Player sync metadata</h2>${metadataItems}</section>
+${activeFailure ? `<section class="card"><h2>Latest failure</h2><div class="metric"><div class="label">${escapeHtml(activeFailure.event)}</div><div class="value">${escapeHtml(activeFailure.failureStage || activeFailure.status || 'Unknown stage')}</div><div class="sub">${escapeHtml(activeFailure.error || activeFailure.reason || '')}</div></div></section>` : ''}
 
-<section class="card"><h2>English candidates</h2><p class="muted">SmartSubs selected <strong>${escapeHtml(selectedId)}</strong>. A very small score gap without hash or size means selection confidence is weak.</p>${topCandidates}</section>
+<section class="card"><details><summary>Source &amp; sync details</summary><p class="muted">${escapeHtml(sync.reason)}</p><div class="metric"><div class="label">Source metadata</div>${metadataItems}</div><p class="muted">${candidateCount} English candidates${Number.isFinite(topScore) ? ` | selected score ${escapeHtml(topScore)}` : ''}</p>${topCandidates}</details></section>
 
-${lastFailure ? `<section class="card"><h2>Latest failure</h2><div class="metric"><div class="label">${escapeHtml(lastFailure.event)}</div><div class="value">${escapeHtml(lastFailure.failureStage || lastFailure.status || 'Unknown stage')}</div><div class="sub">${escapeHtml(lastFailure.error || lastFailure.reason || '')}</div></div></section>` : ''}
-
-<section class="card"><details><summary>Verdict reference</summary><p class="muted">Legacy diagnostic codes retained for compatibility and deep debugging.</p><div class="event-detail"><span><code>NO_SUBTITLE_REQUEST_SEEN</code></span><span><code>NO_ENGLISH_SOURCE_FOUND</code></span><span><code>NATIVE_MALAY_WITH_AUTO_FALLBACK</code></span><span><code>SUBTITLE_RETURNED_WAITING_FOR_PLAYER_SELECTION</code></span><span><code>PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION</code></span><span><code>PREFETCH_FAILED_WAITING_FOR_PLAYER_SELECTION</code></span><span><code>QUEUE_PREFETCH_QUEUED</code></span><span><code>QUEUE_PREFETCH_TRANSLATING</code></span><span><code>QUEUE_PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION</code></span><span><code>QUEUE_PREFETCH_FAILED_WAITING_FOR_PLAYER_SELECTION</code></span><span><code>QUEUE_JOIN_WAITING</code></span><span><code>TRANSLATION_PREPARING_IN_QUEUE</code></span><span><code>TRANSLATION_DELIVERED</code></span><span><code>TRANSLATION_FAILED</code></span></div></details></section>
-
-<section class="card"><details><summary>Raw recent events</summary><p class="muted">Shown in Malaysia time. Use this only when the summary above is not enough.</p>${rawEvents}</details></section>
+<section class="card"><details><summary>Technical events (${sorted.length})</summary><p class="muted">Build ${BUILD_ID} | Verdict <code>${escapeHtml(verdict)}</code> | Events retained for up to 24 hours (MYT).</p>${rawEvents}</details></section>
 </main></body></html>`
 }
 async function prefetchTranslation(options = {}) {
