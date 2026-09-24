@@ -179,7 +179,7 @@ test('ON page retains canonical Compact UI layout with its title inside the stat
   const { browse, toggle } = await setup()
   assert.equal((await toggle('on')).status, 303)
   const html = await (await browse('/diagnose')).text()
-  assert.match(html, /<body><main class="wrap">\s*<section class="card"><h1>SmartSubs Diagnose<\/h1><div class="status">/)
+  assert.match(html, /<body><main class="wrap">\s*<section class="card"><header class="diagnose-heading"><h1>SmartSubs Diagnose<\/h1>/)
   assert.match(html, /Diagnostics:.*ON/)
   assert.match(html, /<section class="card"><h2>Overview<\/h2><div class="grid">/)
   assert.match(html, /<summary>Source &amp; sync details<\/summary>/)
