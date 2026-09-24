@@ -87,11 +87,16 @@ test('default OFF: no Diagnostics KV reads/writes; translation cache keeps worki
   assert.equal(calls.filter(([op]) => op === 'get').length, 1, 'translation cache remains active')
 })
 
-test('switch requires separate admin key; blocks configured-token-only and cross-origin POSTs', async () => {
+test('switch requires separate admin key and supports browser/proxy request-header variations', async () => {
   const { browse, toggle, env, calls, adminKey } = await setup()
   assert.equal((await toggle('on', 'wrong-key-at-least-twenty-chars')).status, 403)
-  assert.equal((await toggle('on', adminKey, { origin: 'https://evil.example' })).status, 403)
-  assert.equal((await toggle('on', adminKey, { 'sec-fetch-site': 'cross-site' })).status, 403)
+  assert.equal((await toggle('on', 'wrong-key-at-least-twenty-chars', {
+    origin: 'https://evil.example', 'sec-fetch-site': 'cross-site'
+  })).status, 403)
+  assert.equal((await toggle('on', adminKey, { origin: 'null', 'sec-fetch-site': 'same-site' })).status, 303)
+  assert.equal((await toggle('off', adminKey, { 'sec-fetch-site': 'cross-site' })).status, 303)
+  assert.equal((await toggle('on', adminKey, { origin: 'https://alternate-host.example' })).status, 303)
+  assert.equal((await toggle('off', adminKey)).status, 303)
   assert.equal((await toggle('on', adminKey, { 'content-type': 'text/plain' })).status, 400)
   assert.equal((await toggle('on', adminKey, { origin: 'https://smartsubs.test', 'content-length': '3000' })).status, 413)
   const page = await browse('/diagnose')

@@ -1438,12 +1438,10 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
     // Only the separate Cloudflare secret can authorise mutations.
     const adminKey = String(env.SMARTSUBS_DIAG_ADMIN_KEY || '')
     if (!diagnosticAdminReady(env)) return send(503, 'text/plain; charset=utf-8', 'Diagnostic admin key is not configured', { noStore: true })
-    const origin = request.headers.get('origin')
-    const site = request.headers.get('sec-fetch-site')
-    if ((origin && origin !== new URL(request.url).origin) ||
-        (site && !['same-origin', 'none'].includes(site))) {
-      return send(403, 'text/plain; charset=utf-8', 'Forbidden', { noStore: true })
-    }
+    // Browser metadata (Origin / Sec-Fetch-Site) can vary in privacy browsers,
+    // embedded players and proxy deployments. It is not authentication.
+    // Authenticate every toggle using the separate server-side admin key below;
+    // never save the key in a cookie, GET parameter, or diagnostics log.
     if (Number(request.headers.get('content-length') || 0) > 2048) return send(413, 'text/plain; charset=utf-8', 'Form too large', { noStore: true })
     let form
     try {
