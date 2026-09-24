@@ -173,3 +173,16 @@ test('existing relay/monitor operations and cleanup preserve an enabled Diagnost
     method: 'PUT', body: 'x'
   }))).status, 405)
 })
+
+
+test('ON page retains canonical Compact UI layout with its title inside the status card', async () => {
+  const { browse, toggle } = await setup()
+  assert.equal((await toggle('on')).status, 303)
+  const html = await (await browse('/diagnose')).text()
+  assert.match(html, /<body><main class="wrap">\s*<section class="card"><h1>SmartSubs Diagnose<\/h1><div class="status">/)
+  assert.match(html, /Diagnostics:.*ON/)
+  assert.match(html, /<section class="card"><h2>Overview<\/h2><div class="grid">/)
+  assert.match(html, /<summary>Source &amp; sync details<\/summary>/)
+  assert.match(html, /<summary>Technical events \(0\)<\/summary>/)
+  assert.doesNotMatch(html, /<body><main class="wrap"><h1>SmartSubs Diagnose<\/h1>/)
+})
