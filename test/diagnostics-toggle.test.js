@@ -105,6 +105,20 @@ test('switch requires separate admin key; blocks configured-token-only and cross
   }), noSecret)).status, 503)
 })
 
+test('admin key accepts six characters but rejects shorter configured or submitted keys', async () => {
+  const ctx = await setup()
+  ctx.env.SMARTSUBS_DIAG_ADMIN_KEY = 'A7$z9q'
+  const page = await ctx.browse('/diagnose')
+  assert.equal(page.status, 200)
+  assert.match(await page.text(), /minlength="6"/)
+  assert.equal((await ctx.toggle('on', 'A7$z9')).status, 403)
+  assert.equal((await ctx.toggle('on', 'A7$z9q')).status, 303)
+  assert.match(await (await ctx.browse('/diagnose')).text(), /Diagnostics:.*ON/)
+  assert.equal((await ctx.toggle('off', 'A7$z9q')).status, 303)
+  ctx.env.SMARTSUBS_DIAG_ADMIN_KEY = 'A7$z9'
+  assert.equal((await ctx.toggle('on', 'A7$z9')).status, 503)
+})
+
 test('ON records diagnostics; OFF stops future writes without deleting old events or other config settings', async () => {
   const { browse, toggle, translationToken, calls, token, otherToken, instances, env, worker } = await setup()
   const on = await toggle('on')

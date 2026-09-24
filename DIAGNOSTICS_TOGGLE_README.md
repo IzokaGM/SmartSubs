@@ -7,7 +7,7 @@ This ZIP is a **patch**, not a full repository. Its paths start from the reposit
 In Cloudflare Dashboard, open the **SmartSubs Worker** → **Settings** → **Variables and Secrets** and add a **Secret** (not a plain text variable):
 
 - Name: `SMARTSUBS_DIAG_ADMIN_KEY`
-- Value: a unique random password of **20–256 characters**, preferably a random 32-character or longer value. This is **not** your Gemini API key or SmartSubs server secret.
+- Value: a unique password of **6–256 characters**. Six characters is the minimum accepted; a longer random key is safer against guessing. This is **not** your Gemini API key or SmartSubs server secret.
 
 Save/deploy the configuration. Do not add the secret value to this ZIP, GitHub, `wrangler.jsonc`, logs or a URL. Ensure the existing `SMARTSUBS_DELIVERY` Durable Object binding is deployed (the ZIP does not add or change bindings/migrations). Without the admin secret or DO binding, Diagnostics stays OFF and the switch is unavailable.
 

@@ -51,12 +51,12 @@ async function recordConfiguredDiagnostic(env, configId, event) {
 }
 
 function diagnosticAdminReady(env) {
-  return String(env?.SMARTSUBS_DIAG_ADMIN_KEY || '').length >= 20 && String(env?.SMARTSUBS_DIAG_ADMIN_KEY || '').length <= 256
+  return String(env?.SMARTSUBS_DIAG_ADMIN_KEY || '').length >= 6 && String(env?.SMARTSUBS_DIAG_ADMIN_KEY || '').length <= 256
 }
 
 function validDiagnosticAdminKey(submitted, stored) {
-  if (typeof submitted !== 'string' || submitted.length < 20 || submitted.length > 256 ||
-      typeof stored !== 'string' || stored.length < 20) return false
+  if (typeof submitted !== 'string' || submitted.length < 6 || submitted.length > 256 ||
+      typeof stored !== 'string' || stored.length < 6) return false
   const a = createHash('sha256').update(submitted, 'utf8').digest()
   const b = createHash('sha256').update(stored, 'utf8').digest()
   return timingSafeEqual(a, b)
@@ -69,7 +69,7 @@ function diagnosticControlHtml(state = { enabled: false }, ready = false, error 
     ? 'Diagnostic events are being recorded to Workers KV.'
     : 'Diagnostic recording is OFF. Translation, Queue and cache still work normally.'
   const button = `<button type="submit" name="action" value="${enabled ? 'off' : 'on'}"${ready ? '' : ' disabled'}>${enabled ? 'Turn OFF' : 'Turn ON'}</button>`
-  return `<section class="card"><h2>Diagnostics: <span class="pill ${enabled ? 'good' : 'neutral'}">${heading}</span></h2><p class="muted">${notice}</p><form method="POST" action="diagnose/toggle" autocomplete="off"><label for="diag-admin">Admin key</label><input id="diag-admin" name="adminKey" type="password" minlength="20" maxlength="256" required autocomplete="off" placeholder="Admin key (not Gemini API key)" ${ready ? '' : 'disabled'}><div>${button}</div></form>${!ready ? '<p class="muted">Set secret SMARTSUBS_DIAG_ADMIN_KEY (20+ characters) and ensure SMARTSUBS_DELIVERY is available.</p>' : ''}${error ? `<p class="bad-text">${escapeHtml(error)}</p>` : ''}</section>`
+  return `<section class="card"><h2>Diagnostics: <span class="pill ${enabled ? 'good' : 'neutral'}">${heading}</span></h2><p class="muted">${notice}</p><form method="POST" action="diagnose/toggle" autocomplete="off"><label for="diag-admin">Admin key</label><input id="diag-admin" name="adminKey" type="password" minlength="6" maxlength="256" required autocomplete="off" placeholder="Admin key (not Gemini API key)" ${ready ? '' : 'disabled'}><div>${button}</div></form>${!ready ? '<p class="muted">Set secret SMARTSUBS_DIAG_ADMIN_KEY (6+ characters) and ensure SMARTSUBS_DELIVERY is available.</p>' : ''}${error ? `<p class="bad-text">${escapeHtml(error)}</p>` : ''}</section>`
 }
 
 
