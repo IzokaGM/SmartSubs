@@ -47,9 +47,9 @@ test('Compact diagnose keeps relevant status and moves source details behind dis
   assert.match(html, /12:42:47/)
   assert.match(html, /English source/)
   assert.match(html, /9214195/)
-  assert.match(html, /Source &amp; sync details/)
-  assert.match(html, /No hash or video size was provided/)
-  assert.match(html, /<summary>Source &amp; sync details<\/summary>/)
+  assert.match(html, /Source details/)
+  assert.match(html, /Source timing is not verified/)
+  assert.match(html, /<summary>Source details<\/summary>/)
   assert.match(html, /<div class=\"label\">Delivery<\/div>/)
   assert.match(html, /<div class="sub">HIT<\/div>/)
   assert.match(html, /411 ms/)
@@ -79,7 +79,7 @@ test('V2 friendly diagnose rates video hash as strong sync evidence', async () =
     englishTop: ['1:hash-match:40000', '2:other:10000']
   }])
 
-  assert.match(html, /video hash/)
+  assert.match(html, /Source timing is not verified/)
   assert.doesNotMatch(html, /<h2>Note<\/h2>/)
 })
 
@@ -91,7 +91,7 @@ test('Compact diagnose keeps native Malay detail only when native subtitles exis
     nativeDecision: 'native-malay-selected'
   }])
   assert.match(html, /<div class="label">Native Malay<\/div>/)
-  assert.match(html, /native-malay-selected/)
+  assert.match(html, /<div class="value">Available<\/div>/)
 })
 
 test('Compact diagnose does not surface a stale failure after successful delivery', async () => {

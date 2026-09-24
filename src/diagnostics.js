@@ -23,7 +23,7 @@ function sanitiseEvent(event = {}) {
     'englishConfidence', 'englishConfidenceReason', 'englishScoreUplift',
     'sourceFilenameProvided', 'sourceVideoHashProvided', 'sourceVideoSizeProvided',
     'sourceFilename', 'requestExtraKeys', 'englishCandidateCount', 'englishSelectedId',
-    'englishSelectedScore', 'englishSelectionStable', 'englishTop',
+    'englishSelectedScore', 'englishSelectionStable', 'englishTop', 'englishSourceIds',
     'expected', 'received', 'missing', 'retryRecovered', 'fallbackCount', 'final',
     'semanticRetriesUsed', 'chunks', 'geminiCalls', 'rateLimits', 'transientRetries',
     'retryWaitMs', 'chunkItems', 'chunkChars', 'concurrency', 'attempts', 'waitMs', 'polls', 'joinStatus', 'reason', 'profile', 'delivery',

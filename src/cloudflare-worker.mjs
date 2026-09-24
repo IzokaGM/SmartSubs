@@ -323,8 +323,8 @@ function compactMediaLabel(subtitle) {
 function compactMalayAutoStatus(subtitle) {
   if (!subtitle) return 'Not requested'
   if (subtitle.result === 'auto-malay-ready' || subtitle.autoReady === true) return 'Ready'
-  if (subtitle.result === 'native-malay') return 'Not used'
-  if (subtitle.result === 'native-malay-with-auto-fallback') return 'Available'
+  if (subtitle.result === 'native-malay') return 'Not available'
+  if (subtitle.result === 'native-malay-with-auto-fallback') return 'Ready'
   return String(subtitle.result || 'Not available')
 }
 
@@ -335,100 +335,28 @@ function formatDuration(value) {
   return `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`
 }
 
-function parseEnglishTop(values = []) {
-  if (!Array.isArray(values)) return []
-  return values.map(value => {
-    const text = String(value || '')
-    const match = text.match(/^(\d+):([^:]+):(-?\d+(?:\.\d+)?)$/)
-    if (!match) return { raw: text }
-    return {
-      rank: Number(match[1]),
-      id: match[2],
-      score: Number(match[3])
-    }
-  })
-}
-
-function syncAssessment(lastSubtitle) {
-  if (!lastSubtitle) {
-    return {
-      level: 'UNKNOWN',
-      tone: 'neutral',
-      reason: 'No subtitle request has been recorded yet.'
-    }
-  }
-
-  const ranked = parseEnglishTop(lastSubtitle.englishTop)
-  const top = ranked[0]
-  const second = ranked[1]
-  const gap = top && second && Number.isFinite(top.score) && Number.isFinite(second.score)
-    ? top.score - second.score
-    : null
-  const candidates = Number(lastSubtitle.englishCandidateCount || ranked.length || 0)
-
-  if (lastSubtitle.sourceVideoHashProvided) {
-    return {
-      level: 'STRONG',
-      tone: 'good',
-      reason: 'Player supplied a video hash, which gives SmartSubs a strong sync signal.'
-    }
-  }
-
-  if (lastSubtitle.sourceVideoSizeProvided && lastSubtitle.sourceFilenameProvided) {
-    return {
-      level: 'GOOD',
-      tone: 'good',
-      reason: 'Player supplied both filename and video size, giving the selector useful release evidence.'
-    }
-  }
-
-  if (candidates > 1 && gap !== null && gap <= 5 && !lastSubtitle.sourceVideoSizeProvided) {
-    return {
-      level: 'UNVERIFIED',
-      tone: 'warn',
-      reason: 'No hash or video size was provided, and the source scores are close. This does not prove the subtitle is out of sync; check timing in the player if needed.'
-    }
-  }
-
-  if (!lastSubtitle.sourceVideoHashProvided && !lastSubtitle.sourceVideoSizeProvided) {
-    return {
-      level: 'LIMITED',
-      tone: 'warn',
-      reason: lastSubtitle.sourceFilenameProvided
-        ? 'Only the player filename is available. If it is a provider label rather than a real release filename, sync confidence is limited.'
-        : 'The player supplied no filename, video hash, or video size for release matching.'
-    }
-  }
-
-  return {
-    level: 'MODERATE',
-    tone: 'warn',
-    reason: 'Some source metadata is available, but SmartSubs does not have a high-confidence video hash match.'
-  }
-}
-
 function verdictPresentation(verdict) {
   const map = {
     NO_SUBTITLE_REQUEST_SEEN: ['Waiting for subtitle request', 'neutral', 'The player has not requested this configured SmartSubs addon yet.'],
     NATIVE_MALAY_RETURNED: ['Native Malay returned', 'good', 'SmartSubs returned an existing Malay subtitle without Gemini translation.'],
-    NATIVE_MALAY_WITH_AUTO_FALLBACK: ['Native Malay + Auto fallback', 'warn', 'Native Malay sync evidence is weak. Malay Auto is available, but Gemini is not used unless you select it.'],
+    NATIVE_MALAY_WITH_AUTO_FALLBACK: ['Native Malay and Malay AI offered', 'good', 'Both subtitle choices were returned to the player.'],
     SUBTITLE_REQUEST_FAILED: ['Subtitle request failed', 'bad', 'SmartSubs received the request but the subtitle request failed.'],
-    NO_ENGLISH_SOURCE_FOUND: ['No English source found', 'bad', 'OpenSubtitles returned no recognised English source for Malay Auto.'],
-    BYOK_NOT_CONFIGURED: ['Gemini key not configured', 'bad', 'Malay Auto cannot run until BYOK configuration is valid.'],
+    NO_ENGLISH_SOURCE_FOUND: ['No English source found', 'bad', 'OpenSubtitles returned no recognised English source for Malay AI.'],
+    BYOK_NOT_CONFIGURED: ['Gemini key not configured', 'bad', 'Malay AI cannot run until BYOK configuration is valid.'],
     SUBTITLE_REQUEST_RETURNED_ZERO: ['No subtitle returned', 'bad', 'SmartSubs was requested but returned zero subtitle tracks.'],
     TRANSLATION_DELIVERED: ['Malay subtitle delivered', 'good', 'The translated Malay VTT was successfully returned to the player.'],
     TRANSLATION_FAILED: ['Translation failed', 'bad', 'The Malay translation request failed. Check the error event below.'],
-    QUEUE_JOIN_WAITING: ['Waiting for queued translation', 'warn', 'The player selected Malay Auto while the background Queue job is still running.'],
-    TRANSLATION_REQUESTED_WAITING_FOR_RESULT: ['Translation requested', 'warn', 'The player requested Malay Auto and SmartSubs is waiting for the result.'],
-    TRANSLATION_PREPARING_IN_QUEUE: ['Translation preparing', 'warn', 'Malay Auto is translating safely in Cloudflare Queue. Retry or select Malay Auto again shortly.'],
-    QUEUE_PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION: ['Malay Auto ready in cache', 'good', 'Background Queue translation finished before player selection.'],
-    QUEUE_PREFETCH_FAILED_WAITING_FOR_PLAYER_SELECTION: ['Background translation failed', 'bad', 'Queue prefetch failed. Selecting Malay Auto may still retry.'],
-    QUEUE_PREFETCH_TRANSLATING: ['Background translation running', 'warn', 'Cloudflare Queue is translating Malay Auto now.'],
-    QUEUE_PREFETCH_QUEUED: ['Translation queued', 'warn', 'The Malay Auto translation job is safely queued.'],
-    PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION: ['Malay Auto ready', 'good', 'Background translation completed and is waiting for player selection.'],
+    QUEUE_JOIN_WAITING: ['Waiting for queued translation', 'warn', 'The player selected Malay AI while the background Queue job is still running.'],
+    TRANSLATION_REQUESTED_WAITING_FOR_RESULT: ['Translation requested', 'warn', 'The player requested Malay AI and SmartSubs is waiting for the result.'],
+    TRANSLATION_PREPARING_IN_QUEUE: ['Translation preparing', 'warn', 'Malay AI is translating safely in Cloudflare Queue. Retry or select Malay AI again shortly.'],
+    QUEUE_PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION: ['Malay AI ready in cache', 'good', 'Background Queue translation finished before player selection.'],
+    QUEUE_PREFETCH_FAILED_WAITING_FOR_PLAYER_SELECTION: ['Background translation failed', 'bad', 'Queue prefetch failed. Selecting Malay AI may still retry.'],
+    QUEUE_PREFETCH_TRANSLATING: ['Background translation running', 'warn', 'Cloudflare Queue is translating Malay AI now.'],
+    QUEUE_PREFETCH_QUEUED: ['Translation queued', 'warn', 'The Malay AI translation job is safely queued.'],
+    PREFETCH_READY_WAITING_FOR_PLAYER_SELECTION: ['Malay AI ready', 'good', 'Background translation completed and is waiting for player selection.'],
     PREFETCH_FAILED_WAITING_FOR_PLAYER_SELECTION: ['Prefetch failed', 'bad', 'Background translation failed.'],
-    PREFETCH_TRANSLATING: ['Prefetch translating', 'warn', 'Malay Auto is translating in the background.'],
-    SUBTITLE_RETURNED_WAITING_FOR_PLAYER_SELECTION: ['Malay Auto offered', 'good', 'SmartSubs returned a Malay Auto track to the player.'],
+    PREFETCH_TRANSLATING: ['Prefetch translating', 'warn', 'Malay AI is translating in the background.'],
+    SUBTITLE_RETURNED_WAITING_FOR_PLAYER_SELECTION: ['Malay AI offered', 'good', 'SmartSubs returned a Malay AI track to the player.'],
     SUBTITLE_RETURNED: ['Subtitle returned', 'good', 'SmartSubs returned a subtitle track.']
   }
   const item = map[verdict] || [verdict, 'neutral', 'See the recent events for more detail.']
@@ -455,12 +383,9 @@ input{display:block;width:100%;max-width:430px;min-height:44px;margin:10px 0;pad
   const lastFailure = sorted.find(item =>
     ['translation-failed', 'queue-translation-failed', 'prefetch-failed'].includes(item.event)
   ) || null
-  const sync = syncAssessment(lastSubtitle)
-  const ranked = parseEnglishTop(lastSubtitle?.englishTop)
   const selectedId = lastSubtitle?.englishSelectedId || 'Not available'
-  const sourceName = lastSubtitle?.sourceFilename || 'Not provided'
-  const candidateCount = Number(lastSubtitle?.englishCandidateCount || ranked.length || 0)
-  const topScore = Number(lastSubtitle?.englishSelectedScore)
+  const sourceIds = Array.isArray(lastSubtitle?.englishSourceIds) ? lastSubtitle.englishSourceIds : []
+  const candidateCount = Number(lastSubtitle?.englishCandidateCount || sourceIds.length || 0)
   // The log does not tag delivery/Queue-complete events with a media ID. Never
   // reuse an older media's duration for the latest subtitle request.
   const latestRequestTs = Number(lastSubtitle?.ts || 0)
@@ -473,30 +398,16 @@ input{display:block;width:100%;max-width:430px;min-height:44px;margin:10px 0;pad
   const hasNativeMalay = Number(lastSubtitle?.malayCount || 0) > 0
   const activeFailure = lastFailure && (!lastDelivery || Number(lastFailure.ts || 0) > Number(lastDelivery.ts || 0)) ? lastFailure : null
 
-  const topCandidates = ranked.length
-    ? ranked.map(item => {
-        if (item.raw) return `<div class="candidate">${escapeHtml(item.raw)}</div>`
-        const selected = String(item.id) === String(selectedId)
-        return `<div class="candidate${selected ? ' selected' : ''}"><span>#${item.rank}</span><strong>${escapeHtml(item.id)}</strong><span>score ${escapeHtml(item.score)}</span>${selected ? '<em>SELECTED</em>' : ''}</div>`
+  // Source order is the unchanged order of eligible, deduplicated OpenSubtitles tracks.
+  // No score or sync-confidence inference is made from missing player metadata.
+  const sourceList = sourceIds.length
+    ? sourceIds.map((id, index) => {
+        const selected = String(id) === String(selectedId)
+        return `<div class="candidate${selected ? ' selected' : ''}"><span>#${index + 1}</span><strong>${escapeHtml(id)}</strong>${selected ? '<em>SELECTED</em>' : ''}</div>`
       }).join('')
-    : '<div class="muted">No ranked English candidates recorded.</div>'
-
-  const metadataItems = [
-    ['Filename', lastSubtitle?.sourceFilenameProvided, sourceName],
-    ['Video hash', lastSubtitle?.sourceVideoHashProvided, lastSubtitle?.sourceVideoHashProvided ? 'Provided' : 'Not provided'],
-    ['Video size', lastSubtitle?.sourceVideoSizeProvided, lastSubtitle?.sourceVideoSizeProvided ? 'Provided' : 'Not provided']
-  ].map(([label, available, detail]) =>
-    `<div class="meta-row"><span>${escapeHtml(label)}</span><strong class="${available ? 'yes' : 'no'}">${available ? 'YES' : 'NO'}</strong><small>${escapeHtml(detail)}</small></div>`
-  ).join('')
-
-  let guidance = ''
-  if (activeFailure) {
-    guidance = 'A recent failure was recorded. See the failure details and recent events below.'
-  } else if (lastSubtitle?.nativeDecision === 'dual-fallback') {
-    guidance = 'Native Malay and Malay Auto are both available. Choose a track in your player.'
-  } else if (lastSubtitle && sync.level === 'UNVERIFIED') {
-    guidance = 'Source match could not be verified from player metadata. If timing is off, compare the selected English track against your video release.'
-  }
+    : '<p class="muted">Source IDs were not recorded for this request.</p>'
+  const guidance = activeFailure
+    ? 'A recent failure was recorded. See the failure details and recent events below.' : ''
 
   const rawEvents = sorted.map(item => {
     const detail = Object.entries(item)
@@ -518,18 +429,18 @@ ${controls}
 
 <section class="card"><h2>Overview</h2><div class="grid">
 <div class="metric media-metric"><div class="label">Latest media</div><div class="value">${escapeHtml(compactMediaLabel(lastSubtitle))}</div></div>
-<div class="metric"><div class="label">Malay Auto</div><div class="value">${escapeHtml(compactMalayAutoStatus(lastSubtitle))}</div><div class="sub">${escapeHtml(lastSubtitle ? `${lastSubtitle.subtitleCount || 0} tracks returned` : 'No subtitle request')}</div></div>
+<div class="metric"><div class="label">Malay AI</div><div class="value">${escapeHtml(compactMalayAutoStatus(lastSubtitle))}</div><div class="sub">${escapeHtml(lastSubtitle ? `${lastSubtitle.subtitleCount || 0} tracks returned` : 'No subtitle request')}</div></div>
 <div class="metric"><div class="label">English source</div><div class="value">${escapeHtml(selectedId === 'Not available' ? '—' : selectedId)}</div></div>
 <div class="metric"><div class="label">Delivery</div><div class="value">${deliveryTime === undefined ? '—' : formatDuration(deliveryTime)}</div><div class="sub">${escapeHtml(deliveryForRequest?.cache || 'Not recorded')}</div></div>
 <div class="metric"><div class="label">Cold translation</div><div class="value">${coldTime === undefined ? '—' : formatDuration(coldTime)}</div><div class="sub">${coldTime === undefined ? 'Not recorded for this request' : 'Latest request'}</div></div>
-${hasNativeMalay ? `<div class="metric"><div class="label">Native Malay</div><div class="value">${escapeHtml(lastSubtitle?.nativeDecision || 'Available')}</div></div>` : ''}
+${hasNativeMalay ? `<div class="metric"><div class="label">Native Malay</div><div class="value">Available</div></div>` : ''}
 </div></section>
 
 ${guidance ? `<section class="card"><h2>Note</h2><div class="guide">${escapeHtml(guidance)}</div></section>` : ''}
 
 ${activeFailure ? `<section class="card"><h2>Latest failure</h2><div class="metric"><div class="label">${escapeHtml(activeFailure.event)}</div><div class="value">${escapeHtml(activeFailure.failureStage || activeFailure.status || 'Unknown stage')}</div><div class="sub">${escapeHtml(activeFailure.error || activeFailure.reason || '')}</div></div></section>` : ''}
 
-<section class="card"><details><summary>Source &amp; sync details</summary><p class="muted">${escapeHtml(sync.reason)}</p><div class="metric"><div class="label">Source metadata</div>${metadataItems}</div><p class="muted">${candidateCount} English candidates${Number.isFinite(topScore) ? ` | selected score ${escapeHtml(topScore)}` : ''}</p>${topCandidates}</details></section>
+<section class="card"><details><summary>Source details</summary><p class="muted">${candidateCount} English sources in OpenSubtitles order. Source timing is not verified.</p>${sourceList}</details></section>
 
 <section class="card"><details><summary>Technical events (${sorted.length})</summary><p class="muted">Build ${BUILD_ID} | Verdict <code>${escapeHtml(verdict)}</code> | Events retained for up to 24 hours (MYT).</p>${rawEvents}</details></section>
 </main></body></html>`

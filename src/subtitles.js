@@ -4,17 +4,15 @@ const crypto = require('node:crypto')
 const config = require('./config')
 const { nowMs, roundMs, logPerf } = require('./perf')
 const { isSupportedRequest, fetchOpenSubtitles } = require('./opensubtitles')
-const { getMalaySubtitles, toNativeMalay } = require('./languages')
-const { selectBestEnglish, rankEnglishSubtitles, rankMalaySubtitles } = require('./selector')
+const { getMalaySubtitles, getEnglishSubtitles, toNativeMalay } = require('./languages')
 const { createTranslationToken } = require('./token')
 
 async function emitDiagnostic(options, payload) {
   if (typeof options.onDiagnostic !== 'function') return
-  try {
-    await options.onDiagnostic(payload)
-  } catch {}
+  try { await options.onDiagnostic(payload) } catch {}
 }
 
+// Preserve upstream ordering and ignore unusable/duplicate URLs.
 function dedupeSubtitles(subtitles) {
   const seen = new Set()
   const output = []
@@ -28,40 +26,18 @@ function dedupeSubtitles(subtitles) {
   return output
 }
 
-function sourceFilename(extra = {}) {
-  const value = String(extra.filename || extra.fileName || extra.file_name || '').trim()
-  if (!value) return ''
-  return value.split(/[\\/]/).pop() || value
-}
-
 function diagnosticSubtitleId(subtitle, index = 0) {
   if (!subtitle || typeof subtitle !== 'object') return `index-${index}`
   const value = subtitle.id ?? subtitle.file_id ?? subtitle.fileId ?? subtitle.subtitle_id ?? subtitle.subtitleId
   return value == null || value === '' ? `index-${index}` : String(value)
 }
 
-function englishSelectionDiagnostics(upstream, selectedEnglish, extra = {}) {
-  const ranked = rankEnglishSubtitles(upstream, extra)
-  const top = ranked.slice(0, 5)
-  const selectedEntry = ranked.find(item => item.subtitle === selectedEnglish) || null
-  const rankedWinner = ranked[0]?.subtitle || null
-
+function englishSelectionDiagnostics(upstream, selectedEnglish) {
+  const candidates = dedupeSubtitles(getEnglishSubtitles(upstream))
   return {
-    sourceFilenameProvided: Boolean(extra && (extra.filename || extra.fileName || extra.file_name)),
-    sourceVideoHashProvided: Boolean(extra && extra.videoHash),
-    sourceVideoSizeProvided: Boolean(extra && extra.videoSize),
-    sourceFilename: sourceFilename(extra),
-    requestExtraKeys: Object.keys(extra || {}).sort().slice(0, 8),
-    englishCandidateCount: ranked.length,
+    englishCandidateCount: candidates.length,
     englishSelectedId: selectedEnglish ? diagnosticSubtitleId(selectedEnglish) : '',
-    englishSelectedScore: selectedEntry ? selectedEntry.score : null,
-    englishConfidence: selectedEntry?.confidence?.level || '',
-    englishConfidenceReason: selectedEntry?.confidence?.reason || '',
-    englishScoreUplift: selectedEntry?.confidence?.scoreUplift ?? null,
-    englishSelectionStable: selectedEnglish === rankedWinner,
-    englishTop: top.map((item, index) =>
-      `${index + 1}:${diagnosticSubtitleId(item.subtitle, index)}:${item.score}`
-    )
+    englishSourceIds: candidates.slice(0, 5).map((subtitle, index) => diagnosticSubtitleId(subtitle, index))
   }
 }
 
@@ -71,6 +47,7 @@ function buildAutoSubtitle(englishSubtitle, options = {}) {
   if (!englishSubtitle || !publicBaseUrl || !tokenSecret) return null
   const token = createTranslationToken(englishSubtitle.url, tokenSecret, englishSubtitle.id, options.media)
   const shortId = crypto.createHash('sha1').update(englishSubtitle.url).digest('hex').slice(0, 12)
+  // Keep the stable subtitle ID and URL format for compatibility with existing players/cache.
   return {
     id: `smartsubs-gemini-${shortId}`,
     url: `${String(publicBaseUrl).replace(/\/+$/, '')}/translated/${token}.vtt`,
@@ -78,18 +55,15 @@ function buildAutoSubtitle(englishSubtitle, options = {}) {
   }
 }
 
-function buildEnglishTracks(upstream, extra = {}, limit = 5) {
+function buildEnglishTracks(upstream, _extra = {}, limit = 5) {
   const maxTracks = Math.max(1, Math.min(5, Number(limit) || 5))
-  return rankEnglishSubtitles(dedupeSubtitles(upstream), extra)
+  return dedupeSubtitles(getEnglishSubtitles(upstream))
     .slice(0, maxTracks)
-    .map((item, index) => {
-      const subtitle = item.subtitle
-      return {
-        id: `smartsubs-eng-${diagnosticSubtitleId(subtitle, index)}`,
-        url: String(subtitle.url),
-        lang: 'eng'
-      }
-    })
+    .map((subtitle, index) => ({
+      id: `smartsubs-eng-${diagnosticSubtitleId(subtitle, index)}`,
+      url: String(subtitle.url),
+      lang: 'eng'
+    }))
 }
 
 async function handleSubtitles(args, options = {}) {
@@ -97,11 +71,8 @@ async function handleSubtitles(args, options = {}) {
   const requestId = crypto.randomUUID()
   if (!isSupportedRequest(args)) {
     await emitDiagnostic(options, {
-      event: 'subtitle-result',
-      result: 'unsupported-request',
-      type: args && args.type,
-      id: args && args.id,
-      subtitleCount: 0
+      event: 'subtitle-result', result: 'unsupported-request',
+      type: args && args.type, id: args && args.id, subtitleCount: 0
     })
     return { subtitles: [], cacheMaxAge: 60 }
   }
@@ -110,191 +81,45 @@ async function handleSubtitles(args, options = {}) {
     const upstreamStartedAt = nowMs()
     const upstream = await fetchOpenSubtitles(args, options)
     const upstreamMs = roundMs(nowMs() - upstreamStartedAt)
-    const rankedMalay = rankMalaySubtitles(
-      dedupeSubtitles(getMalaySubtitles(upstream)),
-      args.extra || {}
-    )
-    const malay = rankedMalay.map(item => item.subtitle)
-    const malaySelectionDiagnostic = {
-      malayCandidateCount: rankedMalay.length,
-      malaySelectedId: rankedMalay[0] ? diagnosticSubtitleId(rankedMalay[0].subtitle) : '',
-      malaySelectedScore: rankedMalay[0] ? rankedMalay[0].score : null,
-      nativeConfidence: rankedMalay[0]?.confidence?.level || 'NONE',
-      nativeConfidenceReason: rankedMalay[0]?.confidence?.reason || 'no-native-malay',
-      nativeScoreUplift: rankedMalay[0]?.confidence?.scoreUplift ?? null,
-      malayTop: rankedMalay.slice(0, 5).map((item, index) =>
-        `${index + 1}:${diagnosticSubtitleId(item.subtitle, index)}:${item.score}`
-      )
-    }
-    const english = selectBestEnglish(upstream, args.extra || {})
-    const selectionDiagnostic = englishSelectionDiagnostics(
-      upstream,
-      english,
-      args.extra || {}
-    )
-
+    const malay = dedupeSubtitles(getMalaySubtitles(upstream)).slice(0, 5).map(toNativeMalay)
+    const englishCandidates = dedupeSubtitles(getEnglishSubtitles(upstream))
+    const english = englishCandidates[0] || null
     const apiKey = options.apiKey || ''
-    const auto = english && apiKey ? buildAutoSubtitle(english, options) : null
+    const ai = english && apiKey ? buildAutoSubtitle(english, options) : null
     const englishTracks = options.includeEnglishTracks
-      ? buildEnglishTracks(upstream, args.extra || {}, options.englishTrackLimit)
-      : []
+      ? buildEnglishTracks(upstream, args.extra || {}, options.englishTrackLimit) : []
 
-    if (malay.length) {
-      const nativeSubtitles = malay.slice(0, 5).map(toNativeMalay)
-      const nativeConfidence = malaySelectionDiagnostic.nativeConfidence
-      const nativeStrong = nativeConfidence === 'STRONG'
-      const autoFallbackOffered = Boolean(auto) && !nativeStrong
-      const nativeDecision = nativeStrong
-        ? 'native-only-strong'
-        : autoFallbackOffered
-          ? 'dual-fallback'
-          : 'native-only-auto-unavailable'
-      const autoPrefetch = false
-      const autoPrefetchReason = nativeStrong
-        ? 'native-strong-no-auto-needed'
-        : autoFallbackOffered
-          ? 'weak-native-wait-for-user-selection'
-          : 'auto-unavailable'
-      const malayOptions = autoFallbackOffered
-        ? [...nativeSubtitles, auto]
-        : nativeSubtitles
-      const subtitles = [...malayOptions, ...englishTracks]
-      const resultName = autoFallbackOffered
-        ? 'native-malay-with-auto-fallback'
-        : 'native-malay'
-
-      logPerf({
-        requestId,
-        milestone: 'SMARTSUBS-P3',
-        type: args.type,
-        id: args.id,
-        upstreamMs,
-        upstreamCount: upstream.length,
-        malayCount: malay.length,
-        ...malaySelectionDiagnostic,
-        englishFound: Boolean(english),
-        ...selectionDiagnostic,
-        nativeDecision,
-        autoFallbackOffered,
-        autoPrefetch,
-        autoPrefetchReason,
-        geminiPrefetchAvoided: true,
-        englishTrackCount: englishTracks.length,
-        result: resultName,
-        totalMs: roundMs(nowMs() - startedAt)
-      })
-
-      await emitDiagnostic(options, {
-        event: 'subtitle-result',
-        type: args.type,
-        id: args.id,
-        result: resultName,
-        upstreamCount: upstream.length,
-        malayCount: malay.length,
-        ...malaySelectionDiagnostic,
-        englishFound: Boolean(english),
-        ...selectionDiagnostic,
-        byokConfigured: Boolean(apiKey),
-        autoReady: Boolean(autoFallbackOffered),
-        nativeDecision,
-        autoFallbackOffered,
-        autoPrefetch,
-        autoPrefetchReason,
-        geminiPrefetchAvoided: true,
-        englishTrackCount: englishTracks.length,
-        subtitleCount: subtitles.length,
-        languages: subtitles.map(item => item.lang)
-      })
-
-      return {
-        subtitles,
-        autoPrefetch,
-        autoPrefetchReason,
-        cacheMaxAge: 120,
-        staleRevalidate: 60,
-        staleError: 600
-      }
+    // Malay AI is offered independently of the presence of native Malay subtitles.
+    // Preserve existing prefetch policy: on with no native Malay, off with native Malay.
+    const autoPrefetch = Boolean(ai) && malay.length === 0
+    const autoPrefetchReason = !ai ? 'ai-unavailable'
+      : malay.length ? 'native-malay-user-selection' : 'no-native-malay-aggressive-prefetch'
+    const subtitles = [...malay, ...(ai ? [ai] : []), ...englishTracks]
+    const resultName = malay.length
+      ? (ai ? 'native-malay-with-auto-fallback' : 'native-malay')
+      : ai ? 'auto-malay-ready' : english ? 'byok-not-configured' : 'no-english'
+    const selectionDiagnostic = englishSelectionDiagnostics(upstream, english)
+    const info = {
+      requestId, type: args.type, id: args.id, upstreamMs,
+      upstreamCount: upstream.length, malayCount: malay.length,
+      englishFound: Boolean(english), ...selectionDiagnostic,
+      byokConfigured: Boolean(apiKey), autoReady: Boolean(ai),
+      autoPrefetch, autoPrefetchReason,
+      englishTrackCount: englishTracks.length, subtitleCount: subtitles.length,
+      languages: subtitles.map(item => item.lang), result: resultName
     }
-
-    const subtitles = [...(auto ? [auto] : []), ...englishTracks]
-    const resultName = auto ? 'auto-malay-ready' : english ? 'byok-not-configured' : 'no-english'
-    logPerf({
-      requestId,
-      milestone: auto ? 'M6' : 'M4',
-      type: args.type,
-      id: args.id,
-      upstreamMs,
-      upstreamCount: upstream.length,
-      malayCount: 0,
-      ...malaySelectionDiagnostic,
-      englishFound: Boolean(english),
-        ...selectionDiagnostic,
-      autoReady: Boolean(auto),
-      byokConfigured: Boolean(apiKey),
-      publicBaseConfigured: Boolean(options.publicBaseUrl ?? config.publicBaseUrl),
-      nativeDecision: 'no-native-malay',
-      autoFallbackOffered: false,
-      autoPrefetch: Boolean(auto),
-      autoPrefetchReason: auto ? 'no-native-malay-aggressive-prefetch' : 'auto-unavailable',
-      geminiPrefetchAvoided: false,
-      englishTrackCount: englishTracks.length,
-      result: resultName,
-      totalMs: roundMs(nowMs() - startedAt)
-    })
-    await emitDiagnostic(options, {
-      event: 'subtitle-result',
-      type: args.type,
-      id: args.id,
-      result: resultName,
-      upstreamCount: upstream.length,
-      malayCount: 0,
-      ...malaySelectionDiagnostic,
-      englishFound: Boolean(english),
-        ...selectionDiagnostic,
-      byokConfigured: Boolean(apiKey),
-      autoReady: Boolean(auto),
-      nativeDecision: 'no-native-malay',
-      autoFallbackOffered: false,
-      autoPrefetch: Boolean(auto),
-      autoPrefetchReason: auto ? 'no-native-malay-aggressive-prefetch' : 'auto-unavailable',
-      geminiPrefetchAvoided: false,
-      englishTrackCount: englishTracks.length,
-      subtitleCount: subtitles.length,
-      languages: subtitles.map(item => item.lang)
-    })
-    return {
-      subtitles,
-      autoPrefetch: Boolean(auto),
-      autoPrefetchReason: auto ? 'no-native-malay-aggressive-prefetch' : 'auto-unavailable',
-      cacheMaxAge: auto ? 120 : 60,
-      staleRevalidate: 60,
-      staleError: 600
-    }
+    logPerf({ ...info, milestone: 'SMARTSUBS-SIMPLE', totalMs: roundMs(nowMs() - startedAt) })
+    await emitDiagnostic(options, { event: 'subtitle-result', ...info })
+    return { subtitles, autoPrefetch, autoPrefetchReason,
+      cacheMaxAge: ai || malay.length ? 120 : 60, staleRevalidate: 60, staleError: 600 }
   } catch (error) {
-    const message = error && error.message || String(error)
-    console.error(JSON.stringify({
-      tag: 'SMARTSUBS_ERROR',
-      requestId,
-      type: args.type,
-      id: args.id,
-      message
-    }))
-    await emitDiagnostic(options, {
-      event: 'subtitle-result',
-      type: args.type,
-      id: args.id,
-      result: 'error',
-      subtitleCount: 0,
-      error: message.slice(0, 160)
-    })
+    const message = error instanceof Error ? error.message : String(error)
+    logPerf({ requestId, milestone: 'SMARTSUBS-SIMPLE', type: args.type, id: args.id, error: message })
+    await emitDiagnostic(options, { event: 'subtitle-result', type: args.type, id: args.id,
+      result: 'error', subtitleCount: 0, error: message.slice(0, 160) })
     return { subtitles: [], cacheMaxAge: 15, staleError: 60 }
   }
 }
 
-module.exports = {
-  dedupeSubtitles,
-  buildAutoSubtitle,
-  buildEnglishTracks,
-  handleSubtitles,
-  englishSelectionDiagnostics
-}
+module.exports = { dedupeSubtitles, buildAutoSubtitle, buildEnglishTracks,
+  handleSubtitles, englishSelectionDiagnostics }

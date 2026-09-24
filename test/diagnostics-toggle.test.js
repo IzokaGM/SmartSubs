@@ -182,7 +182,7 @@ test('ON page retains canonical Compact UI layout with its title inside the stat
   assert.match(html, /<body><main class="wrap">\s*<section class="card"><header class="diagnose-heading"><h1>SmartSubs Diagnose<\/h1>/)
   assert.match(html, /Diagnostics:.*ON/)
   assert.match(html, /<section class="card"><h2>Overview<\/h2><div class="grid">/)
-  assert.match(html, /<summary>Source &amp; sync details<\/summary>/)
+  assert.match(html, /<summary>Source details<\/summary>/)
   assert.match(html, /<summary>Technical events \(0\)<\/summary>/)
   assert.doesNotMatch(html, /<body><main class="wrap"><h1>SmartSubs Diagnose<\/h1>/)
 })

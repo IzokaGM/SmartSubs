@@ -20,7 +20,7 @@ test('Compact Overview keeps 1 full-width media and 2x2 fixed metrics with reada
   assert.match(html, /Latest subtitle request: 24\/09\/2026, 9:26:40 pm MYT/)
   assert.doesNotMatch(html, /MYT\s*\|\s*MYT/)
   assert.match(html, /class="metric media-metric"[^>]*><div class="label">Latest media<\/div><div class="value">S2E23 · tt1196946:2:23<\/div>/)
-  assert.match(html, /<div class="label">Malay Auto<\/div><div class="value">Ready<\/div>/)
+  assert.match(html, /<div class="label">Malay AI<\/div><div class="value">Ready<\/div>/)
   assert.match(html, /<div class="label">English source<\/div><div class="value">9280753<\/div>/)
   assert.match(html, /<div class="label">Delivery<\/div><div class="value">375 ms<\/div><div class="sub">HIT<\/div>/)
   assert.match(html, /<div class="label">Cold translation<\/div><div class="value">29\.9 s<\/div>/)
