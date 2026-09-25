@@ -405,61 +405,83 @@ async function translateCues(cues, options = {}) {
   }
 
   let nextIndex = 0
+  let firstFailure = null
+  let recoverySplits = 0
 
   async function worker() {
-    while (true) {
+    while (!firstFailure) {
       const index = nextIndex++
       if (index >= chunks.length) return
 
       const startedAt = metricNow(options)
       chunkStartMs[index] = metricMs(startedAt - translationStartedAt)
+      const texts = chunks[index].map(cue => cue.text)
 
-      const childOptions = {
-        ...options,
-        requestMetrics,
-        onTranslationStats: stats => {
-          chunkStats[index] = stats
+      // A failed full-chunk attempt must not overwrite the stats of a later
+      // successful recovery (or leak a partial result into the VTT).
+      async function translatePart(part) {
+        let partStats = null
+        const translatedPart = await translateFn(part, {
+          ...options,
+          requestMetrics,
+          onTranslationStats: stats => { partStats = stats }
+        })
+        if (!Array.isArray(translatedPart) || translatedPart.length !== part.length) {
+          throw new Error(`Gemini translation count mismatch: expected ${part.length}, got ${translatedPart?.length ?? 'none'}`)
         }
+        return { texts: translatedPart, stats: partStats }
       }
 
       let abortRetriesForChunk = 0
       try {
         while (true) {
           try {
-            results[index] = await translateFn(
-              chunks[index].map(cue => cue.text),
-              childOptions
-            )
+            const result = await translatePart(texts)
+            results[index] = result.texts
+            chunkStats[index] = result.stats
             break
           } catch (error) {
             const aborted = (
               error?.name === 'AbortError' ||
               /aborted|aborterror|timeout/i.test(String(error?.message || error || ''))
             )
+            if (!aborted) throw error
 
-            if (!aborted || abortRetriesForChunk >= 1) throw error
+            if (abortRetriesForChunk >= 1) {
+              // Only repeated timeouts split a chunk. An exhausted HTTP 503
+              // stays on the existing backoff / Queue path to avoid adding
+              // requests while Gemini is unavailable. Split once, in memory,
+              // without spawning additional workers or KV writes.
+              if (texts.length < 4) throw error
+              const middle = Math.ceil(texts.length / 2)
+              const first = await translatePart(texts.slice(0, middle))
+              const second = await translatePart(texts.slice(middle))
+              results[index] = [...first.texts, ...second.texts]
+              chunkStats[index] = aggregateTranslationStats(
+                [first.stats, second.stats], texts.length
+              )
+              recoverySplits++
+              break
+            }
 
             abortRetriesForChunk++
-            // An aborted call may indicate Gemini is slow/overloaded. Retrying
-            // the same chunk after 100ms creates another request too soon.
-            // Use 2–5s jitter by default; retain an explicit delay for tests
-            // and deployments that deliberately override this setting.
+            // Preserve the existing 45s timeout and 2–5s retry backoff.
             const waitMs = options.abortRetryDelayMs === undefined
               ? 2000 + Math.floor(
                 Math.min(1, Math.max(0, Number((options.jitterFn || Math.random)()) || 0)) * 3000
               )
               : Math.max(0, Math.min(15000, Number(options.abortRetryDelayMs) || 0))
-
             requestMetrics.abortRetries = Number(requestMetrics.abortRetries || 0) + 1
             requestMetrics.transientRetries = Number(requestMetrics.transientRetries || 0) + 1
             requestMetrics.retryWaitMs = Number(requestMetrics.retryWaitMs || 0) + waitMs
-
-            if (waitMs > 0) {
-              const retrySleepFn = options.sleepFn || sleep
-              await retrySleepFn(waitMs)
-            }
+            if (waitMs > 0) await (options.sleepFn || sleep)(waitMs)
           }
         }
+      } catch (error) {
+        // Stop scheduling untouched chunks, but allow already-running workers
+        // to finish before the Queue sees a failure and starts another attempt.
+        if (!firstFailure) firstFailure = error
+        return
       } finally {
         chunkMs[index] = metricMs(metricNow(options) - startedAt)
       }
@@ -467,14 +489,16 @@ async function translateCues(cues, options = {}) {
   }
 
   const workerCount = Math.min(concurrency, Math.max(1, chunks.length))
-
-  try {
-    await Promise.all(Array.from({ length: workerCount }, () => worker()))
-  } catch (error) {
+  const outcomes = await Promise.allSettled(
+    Array.from({ length: workerCount }, () => worker())
+  )
+  const error = firstFailure || outcomes.find(outcome => outcome.status === 'rejected')?.reason
+  if (error) {
     try {
       error.smartsubsPerf = {
         ...(error.smartsubsPerf || {}),
-        ...perfSnapshot()
+        ...perfSnapshot(),
+        recoverySplits
       }
     } catch {}
     throw error
@@ -501,6 +525,7 @@ async function translateCues(cues, options = {}) {
       transientRetries: Number(requestMetrics.transientRetries || 0),
       abortRetries: Number(requestMetrics.abortRetries || 0),
       retryWaitMs: Number(requestMetrics.retryWaitMs || 0),
+      recoverySplits,
       chunkItems: plan.maxItems,
       chunkChars: plan.maxChars,
       concurrency,

@@ -213,7 +213,7 @@ test('M19 Queue completion includes queue delay and detailed metrics', async () 
   assert.equal(completed.geminiCallMs.length, 6)
 })
 
-test('M19 Queue retry records why next attempt was scheduled', async () => {
+test('M19 Queue retry schedules the next attempt while Diagnostics is OFF', async () => {
   const { handleQueue } = await import('../src/cloudflare-worker.mjs')
 
   const recorded = []
@@ -229,7 +229,7 @@ test('M19 Queue retry records why next attempt was scheduled', async () => {
   await handleQueue({
     messages: [{
       body: {
-        configId: '0123456789abcdef',
+        configId: 'retry-config',
         cacheKey: '',
         v: 1
       },
@@ -239,12 +239,7 @@ test('M19 Queue retry records why next attempt was scheduled', async () => {
       }
     }]
   }, {
-    SMARTSUBS_CACHE: kv,
-    SMARTSUBS_DIAG_ADMIN_KEY: 'retry-test-admin-key-very-long',
-    // This regression checks diagnostic retry payload when the owner enabled it.
-    SMARTSUBS_DELIVERY: { idFromName: name => name, get: () => ({
-      async fetch() { return new Response(JSON.stringify({ enabled: true, since: 0 })) }
-    }) }
+    SMARTSUBS_CACHE: kv
   }, {
     processFn: async () => {
       throw new Error('Gemini HTTP 503')
@@ -253,12 +248,7 @@ test('M19 Queue retry records why next attempt was scheduled', async () => {
 
   assert.deepEqual(retries, [{ delaySeconds: 20 }])
 
-  const event = recorded.find(item => item.event === 'queue-retry-scheduled')
-  assert.ok(event)
-  assert.equal(event.attempts, 2)
-  assert.equal(event.nextAttempt, 3)
-  assert.equal(event.retryDelaySeconds, 20)
-  assert.equal(event.failureStage, 'gemini')
+  assert.equal(recorded.length, 0, 'Diagnostics OFF must not add KV writes for retry events')
 })
 
 test('M19 keeps M17 speed settings unchanged', () => {

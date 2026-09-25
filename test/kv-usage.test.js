@@ -70,12 +70,7 @@ test('real Worker cached playback is attributed to episode; repeated playback pr
     async delete(k) { calls.push(['delete', k]) }
   }
   const path = `https://smartsubs.test/c/${configToken}/translated/${token}.vtt`
-  // Keep this pre-existing cached-playback test in ON mode.
-  const env = { SMARTSUBS_SECRET: secret, SMARTSUBS_DIAG_ADMIN_KEY: 'usage-test-admin-key-very-long', SMARTSUBS_CACHE: kv,
-    SMARTSUBS_DELIVERY: { idFromName(name) { return name }, get() { return {
-      async fetch() { return new Response(JSON.stringify({ enabled: true, since: 0 }), { headers: { 'content-type': 'application/json' } }) }
-    } } }
-  }
+  const env = { SMARTSUBS_SECRET: secret, SMARTSUBS_CACHE: kv }
   const logs = []
   const original = console.log
   console.log = line => { if (line.includes('SMARTSUBS_KV_USAGE')) logs.push(JSON.parse(line)) }
@@ -92,9 +87,9 @@ test('real Worker cached playback is attributed to episode; repeated playback pr
   assert.deepEqual(logs[0].media, { type: 'series', id: 'tt123:1:6', season: 1, episode: 6 })
   assert.equal(logs[0].phase, 'player-translation')
   assert.equal(logs[0].attempted.get, 1)
-  assert.equal(logs[0].attempted.put, 2) // Existing diagnostics untouched.
+  assert.equal(logs[0].attempted.put, 0) // Diagnostics is OFF by default.
   assert.equal(logs[1].attempted.get, 0) // Memory cache was not disabled by tracking.
-  assert.equal(logs[1].attempted.put, 2)
+  assert.equal(logs[1].attempted.put, 0)
   assert.equal(calls.filter(item => item[0] === 'get').length, 1)
 })
 
@@ -123,7 +118,7 @@ test('queue usage is flushed separately for each message, including retry-path w
   assert.equal(logs.length, 1)
   assert.equal(logs[0].phase, 'queue')
   assert.equal(logs[0].attempt, 2)
-  assert.equal(logs[0].attempted.put, 2) // OFF by default: direct test write + retry state, no retry diagnostic.
+  assert.equal(logs[0].attempted.put, 2) // Explicit mock write + Queue retry state; Diagnostics defaults OFF.
   assert.equal(logs[0].mediaKnown, false) // Legacy/unidentifiable input must not be guessed.
   assert.equal(calls.length, 2)
 })

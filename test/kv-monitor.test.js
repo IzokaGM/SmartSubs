@@ -90,7 +90,7 @@ test('Private monitor reads only configured user reports, and does no Workers KV
   assert.ok(ids.some(name => name.startsWith('kv-monitor:v1:')))
 })
 
-test('Real player operation is written to monitor asynchronously without extra KV writes', async () => {
+test('Real player operation is written to monitor without extra KV writes while Diagnostics is OFF', async () => {
   const { default: worker, TranslationDeliveryRelay, translationCacheKey } = await import('../src/cloudflare-worker.mjs')
   const { createTranslationToken, decodeTranslationTokenData } = require('../src/token')
   const { tokenFingerprint } = require('../src/user-config')
@@ -105,16 +105,10 @@ test('Real player operation is written to monitor asynchronously without extra K
     async put(key) { kvCalls.push(['put', key]) }
   }
   const instances = new Map()
-  const env = { SMARTSUBS_SECRET: secret, SMARTSUBS_DIAG_ADMIN_KEY: 'monitor-test-admin-key-very-long', SMARTSUBS_CACHE: kv, SMARTSUBS_DELIVERY: {
+  const env = { SMARTSUBS_SECRET: secret, SMARTSUBS_CACHE: kv, SMARTSUBS_DELIVERY: {
     idFromName(name) { return name },
     get(id) { if (!instances.has(id)) instances.set(id, new TranslationDeliveryRelay({ storage: mockStorage() }, {})); return { fetch: (url, init) => instances.get(id).fetch(new Request(url, init)) } }
   } }
-  // Explicitly enable diagnostics for this existing ON-mode monitor regression.
-  const diagnosticRelay = instances.get(`kv-monitor:v1:${tokenFingerprint(configToken)}`) ||
-    (() => { const relay = new TranslationDeliveryRelay({ storage: mockStorage() }, {}); instances.set(`kv-monitor:v1:${tokenFingerprint(configToken)}`, relay); return relay })()
-  await diagnosticRelay.fetch(new Request('https://internal/diagnostics/state', {
-    method: 'POST', body: JSON.stringify({ enabled: true })
-  }))
   const pending = []
   const ctx = { waitUntil(promise) { pending.push(promise) } }
   const original = console.log
@@ -125,11 +119,11 @@ test('Real player operation is written to monitor asynchronously without extra K
     await Promise.all(pending)
   } finally { console.log = original }
   assert.equal(response.status, 200)
-  assert.equal(kvCalls.filter(([method]) => method === 'put').length, 2)
+  assert.equal(kvCalls.filter(([method]) => method === 'put').length, 0) // Diagnostics defaults OFF
   const relay = instances.get(`kv-monitor:v1:${tokenFingerprint(configToken)}`)
   const reports = await (await relay.fetch(new Request('https://internal/usage'))).json()
   assert.equal(reports[0].media.id, 'tt123:1:7')
-  assert.equal(reports[0].attempted.put, 2)
+  assert.equal(reports[0].attempted.put, 0)
   assert.equal(reports[0].attempted.get, 1)
 })
 

@@ -72,7 +72,7 @@ test('English-only OpenSubtitles result returns Malay Auto and built-in English 
     })
     assert.equal(diagnose.status, 200)
     const html = await diagnose.text()
-    assert.match(html, /Diagnostics:.*OFF/)
+    assert.match(html, /Diagnostics recording is off/) // Diagnose OFF by default; no stored event is read.
   } finally {
     global.fetch = originalFetch
   }
