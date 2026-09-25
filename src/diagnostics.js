@@ -29,7 +29,8 @@ function sanitiseEvent(event = {}) {
     'retryWaitMs', 'chunkItems', 'chunkChars', 'concurrency', 'attempts', 'waitMs', 'polls', 'joinStatus', 'reason', 'profile', 'delivery',
     'queueDelayMs', 'sourceFetchMs', 'parseMs', 'sourceBytes', 'cueCount', 'pipelineMs',
     'translationWallMs', 'chunkTimeline', 'maxChunkMs', 'avgChunkMs', 'sumChunkMs',
-    'geminiCallMs', 'geminiStatuses', 'geminiPromptChars', 'failureStage',
+    'geminiCallMs', 'geminiStatuses', 'geminiPromptChars',
+    'geminiFinishReasons', 'geminiOutputTokens', 'failureStage',
     'retryDelaySeconds', 'nextAttempt', 'abortRetries'
   ]
   for (const key of allowed) {

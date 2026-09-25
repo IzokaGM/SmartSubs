@@ -163,12 +163,22 @@ async function requestGemini(prompt, options = {}) {
     const callStartedAt = metricNow(options)
     let recorded = false
 
-    const recordCall = status => {
+    const recordCall = (status, body = null) => {
       if (!metrics || recorded) return
       recorded = true
       pushMetric(metrics, 'geminiCallMs', metricMs(metricNow(options) - callStartedAt))
       pushMetric(metrics, 'geminiStatuses', status)
       pushMetric(metrics, 'geminiPromptChars', String(prompt || '').length)
+      // Keep one compact metadata entry per completed API attempt, including
+      // failures, so the arrays stay aligned without storing response text.
+      const finishReason = body?.candidates?.[0]?.finishReason
+      pushMetric(metrics, 'geminiFinishReasons',
+        typeof finishReason === 'string' && finishReason
+          ? finishReason.slice(0, 32) : 'NA')
+      const outputTokens = body?.usageMetadata?.candidatesTokenCount
+      pushMetric(metrics, 'geminiOutputTokens',
+        typeof outputTokens === 'number' && Number.isFinite(outputTokens) && outputTokens >= 0
+          ? Math.round(outputTokens) : 'NA')
     }
 
     try {
@@ -198,7 +208,7 @@ async function requestGemini(prompt, options = {}) {
 
       if (response.ok) {
         const body = await response.json()
-        recordCall(status || 200)
+        recordCall(status || 200, body)
         return body
       }
 
@@ -234,12 +244,9 @@ async function requestGemini(prompt, options = {}) {
 }
 function buildIndexedPrompt(items) {
   return [
-    'Translate these English subtitles into natural Malaysian Bahasa Melayu, following professional TV and streaming subtitle style.',
-    'Use concise, fluent, conversational Malay. Avoid literal translation, stiff or overly formal language, unintended Indonesian phrasing and unnecessary local slang.',
-    'Preserve meaning, tone, emotion and character relationships. Adapt expressions naturally without adding, omitting or softening important meaning.',
-    'Keep dialogue short and easy to read. Choose pronouns and vocabulary from context; stay consistent across related cues.',
-    'Preserve names, numbers, speaker markers and formatting tags. Use natural line breaks and no more than two lines per cue where practical.',
-    'Return exactly one translated object for each input id, preserving all ids and their original order. Do not merge, split, omit or add cues. Output only the required JSON.',
+    'Translate every English cue into concise, natural Malaysian Bahasa Melayu for professional TV and streaming subtitles. Preserve meaning, tone, emotion and character relationships. Use context-appropriate pronouns and conversational wording; avoid literal translation, unintended Indonesian phrasing, forced slang and stiff formality.',
+    'Preserve names, numbers, speaker markers and formatting tags. Keep cues readable with natural breaks (at most two lines where practical).',
+    'Return JSON matching the schema: exactly one nonempty translated object per input id, preserving all ids and original order. Do not merge, split, omit or add cues; no explanation.',
     '',
     JSON.stringify(items)
   ].join('\n')
@@ -378,7 +385,9 @@ async function translateCues(cues, options = {}) {
     retryWaitMs: 0,
     geminiCallMs: [],
     geminiStatuses: [],
-    geminiPromptChars: []
+    geminiPromptChars: [],
+    geminiFinishReasons: [],
+    geminiOutputTokens: []
   }
 
   function perfSnapshot() {
@@ -400,7 +409,9 @@ async function translateCues(cues, options = {}) {
       abortRetries: Number(requestMetrics.abortRetries || 0),
       geminiCallMs: Array.isArray(requestMetrics.geminiCallMs) ? requestMetrics.geminiCallMs : [],
       geminiStatuses: Array.isArray(requestMetrics.geminiStatuses) ? requestMetrics.geminiStatuses : [],
-      geminiPromptChars: Array.isArray(requestMetrics.geminiPromptChars) ? requestMetrics.geminiPromptChars : []
+      geminiPromptChars: Array.isArray(requestMetrics.geminiPromptChars) ? requestMetrics.geminiPromptChars : [],
+      geminiFinishReasons: Array.isArray(requestMetrics.geminiFinishReasons) ? requestMetrics.geminiFinishReasons : [],
+      geminiOutputTokens: Array.isArray(requestMetrics.geminiOutputTokens) ? requestMetrics.geminiOutputTokens : []
     }
   }
 
