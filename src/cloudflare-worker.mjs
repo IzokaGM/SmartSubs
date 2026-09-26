@@ -557,7 +557,7 @@ function queueJoinPollMs(env) {
 }
 
 function playerQueueWaitMaxMs(env) {
-  return Math.max(2000, Math.min(10000, Number(env.PLAYER_QUEUE_WAIT_MAX_MS || 5000)))
+  return Math.max(2000, Math.min(30000, Number(env.PLAYER_QUEUE_WAIT_MAX_MS || 28000)))
 }
 
 function playerQueueGraceMs(env) {

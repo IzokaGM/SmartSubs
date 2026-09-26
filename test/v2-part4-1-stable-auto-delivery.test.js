@@ -4,12 +4,12 @@ const test = require('node:test')
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 
-test('Part 4.1 deployed player Queue wait is nine seconds', async () => {
+test('Part 4.1 deployed player Queue wait is 28 seconds', async () => {
   const { playerQueueWaitMaxMs } = await import('../src/cloudflare-worker.mjs')
   const config = JSON.parse(fs.readFileSync('wrangler.jsonc', 'utf8'))
 
-  assert.equal(config.vars.PLAYER_QUEUE_WAIT_MAX_MS, '9000')
-  assert.equal(playerQueueWaitMaxMs({ PLAYER_QUEUE_WAIT_MAX_MS: '9000' }), 9000)
+  assert.equal(config.vars.PLAYER_QUEUE_WAIT_MAX_MS, '28000')
+  assert.equal(playerQueueWaitMaxMs({ PLAYER_QUEUE_WAIT_MAX_MS: '28000' }), 28000)
 })
 
 test('Part 4.1 selected profile is stable concurrency three', async () => {

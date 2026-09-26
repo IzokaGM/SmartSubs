@@ -31,7 +31,7 @@ test('Part 4.3 config binds a strongly consistent delivery relay and preserves s
   assert.equal(binding.class_name, 'TranslationDeliveryRelay')
   assert.deepEqual(migration.new_sqlite_classes, ['TranslationDeliveryRelay'])
   assert.equal(config.vars.DELIVERY_RELAY_TTL_MS, '120000')
-  assert.equal(config.vars.PLAYER_QUEUE_WAIT_MAX_MS, '9000')
+  assert.equal(config.vars.PLAYER_QUEUE_WAIT_MAX_MS, '28000')
   assert.equal(config.vars.PLAYER_QUEUE_GRACE_MS, '600')
   assert.equal(config.vars.QUEUE_USER_SELECTED_CONCURRENCY, '3')
 })
