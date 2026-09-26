@@ -556,6 +556,56 @@ function queueJoinPollMs(env) {
   return Math.max(500, Math.min(5000, Number(env.QUEUE_JOIN_POLL_MS || 1500)))
 }
 
+function playerQueuePollEarlyMs(env) {
+  return Math.max(1000, Math.min(10000, Number(env.PLAYER_QUEUE_POLL_EARLY_MS || 6000)))
+}
+
+function playerQueuePollFastStartMs(env) {
+  return Math.max(0, Math.min(30000, Number(env.PLAYER_QUEUE_POLL_FAST_START_MS || 12000)))
+}
+
+function playerQueuePollLateStartMs(env) {
+  return Math.max(playerQueuePollFastStartMs(env), Math.min(60000, Number(env.PLAYER_QUEUE_POLL_LATE_START_MS || 25000)))
+}
+
+function playerQueuePollLateMs(env) {
+  return Math.max(1000, Math.min(10000, Number(env.PLAYER_QUEUE_POLL_LATE_MS || 3000)))
+}
+
+function playerQueuePollPlan(env, job, now = Date.now()) {
+  const state = String(job?.state || '')
+  const updatedAt = Number(job?.updatedAt || 0)
+  const fastMs = queueJoinPollMs(env)
+
+  if (state === 'ready') return { pollMs: fastMs, boundaryMs: 0, phase: 'fast' }
+  if (state === 'retrying' || state === 'failed') return { pollMs: playerQueuePollLateMs(env), boundaryMs: 0, phase: 'late' }
+
+  if ((state === 'queued' || state === 'running') && updatedAt > 0) {
+    const ageMs = Math.max(0, Number(now) - updatedAt)
+    const fastStartMs = playerQueuePollFastStartMs(env)
+    const lateStartMs = playerQueuePollLateStartMs(env)
+
+    if (ageMs < fastStartMs) {
+      return {
+        pollMs: playerQueuePollEarlyMs(env),
+        boundaryMs: Math.max(1, fastStartMs - ageMs),
+        phase: 'early'
+      }
+    }
+    if (ageMs < lateStartMs) {
+      return {
+        pollMs: fastMs,
+        boundaryMs: Math.max(1, lateStartMs - ageMs),
+        phase: 'fast'
+      }
+    }
+    return { pollMs: playerQueuePollLateMs(env), boundaryMs: 0, phase: 'late' }
+  }
+
+  // While still queued, avoid burning KV reads before the consumer has started.
+  return { pollMs: playerQueuePollEarlyMs(env), boundaryMs: 0, phase: 'early' }
+}
+
 function playerQueueWaitMaxMs(env) {
   return Math.max(2000, Math.min(30000, Number(env.PLAYER_QUEUE_WAIT_MAX_MS || 28000)))
 }
@@ -884,15 +934,26 @@ async function waitForQueueCache(options = {}) {
   const nowFn = options.nowFn || Date.now
   const maxWaitMs = Math.max(0, Number(options.maxWaitMs ?? queueJoinMaxMs(env)))
   const pollMs = Math.max(1, Number(options.pollMs ?? queueJoinPollMs(env)))
+  const adaptivePlayerPolling = options.playerAdaptivePolling === true
   const startedAt = nowFn()
   let polls = 0
   let job = options.initialJob || await readQueueJobState(env, cacheKey)
 
   while (queueJobActive(job)) {
-    const elapsed = Math.max(0, nowFn() - startedAt)
+    const now = nowFn()
+    const elapsed = Math.max(0, now - startedAt)
     if (elapsed >= maxWaitMs) break
 
-    const waitMs = Math.min(pollMs, Math.max(1, maxWaitMs - elapsed))
+    let nextPollMs = pollMs
+    if (adaptivePlayerPolling) {
+      const plan = playerQueuePollPlan(env, job, now)
+      nextPollMs = Math.max(1, Number(plan.pollMs || pollMs))
+      if (Number(plan.boundaryMs || 0) > 0) {
+        nextPollMs = Math.min(nextPollMs, Math.max(1, Number(plan.boundaryMs)))
+      }
+    }
+
+    const waitMs = Math.min(nextPollMs, Math.max(1, maxWaitMs - elapsed))
     await sleepFn(waitMs)
     polls++
 
@@ -1455,7 +1516,8 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
             cacheKey,
             initialJob: job,
             maxWaitMs: playerQueueWaitMaxMs(env),
-            graceMs: playerQueueGraceMs(env)
+            graceMs: playerQueueGraceMs(env),
+            playerAdaptivePolling: true
           })
 
           joinWaitMs = joined.waitMs
@@ -1528,7 +1590,8 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
             cache,
             cacheKey,
             maxWaitMs: playerQueueWaitMaxMs(env),
-            graceMs: playerQueueGraceMs(env)
+            graceMs: playerQueueGraceMs(env),
+            playerAdaptivePolling: true
           })
 
           joinWaitMs = joined.waitMs
@@ -1862,4 +1925,4 @@ export default {
   }
 }
 
-export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, normaliseRequestedQueueProfile, queueTranslationProfile, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady, shouldPrefetchAutoResult, playerQueueWaitMaxMs, playerQueueGraceMs, deliveryRelayTtlMs, readDeliveryRelay, writeDeliveryRelay, readReadyTranslation, translationPreparingResponse }
+export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, normaliseRequestedQueueProfile, queueTranslationProfile, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady, shouldPrefetchAutoResult, playerQueueWaitMaxMs, playerQueueGraceMs, playerQueuePollEarlyMs, playerQueuePollFastStartMs, playerQueuePollLateStartMs, playerQueuePollLateMs, playerQueuePollPlan, deliveryRelayTtlMs, readDeliveryRelay, writeDeliveryRelay, readReadyTranslation, translationPreparingResponse }
