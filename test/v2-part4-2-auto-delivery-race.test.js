@@ -117,6 +117,6 @@ test('Part 4.2 does not change stable translation concurrency', () => {
   const config = JSON.parse(fs.readFileSync('wrangler.jsonc', 'utf8'))
 
   assert.equal(config.vars.QUEUE_USER_SELECTED_CONCURRENCY, '3')
-  assert.equal(config.vars.QUEUE_FINAL_CONCURRENCY, '4')
+  assert.equal(config.vars.QUEUE_FINAL_CONCURRENCY, '3')
 })
 
