@@ -113,6 +113,49 @@ function safeMessage(error, apiKey) {
   return message.slice(0, 300)
 }
 
+function safeDiagnosticHeader(request, name, maxLength = 180) {
+  const value = String(request?.headers?.get?.(name) || '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .trim()
+  return value ? value.slice(0, maxLength) : ''
+}
+
+function translationRequestProbe(request) {
+  // Record only non-secret metadata useful for identifying duplicate subtitle
+  // GET patterns. Never include URL/config token, IP, Cookie, Authorization,
+  // Origin or Referer in diagnostic KV.
+  const method = String(request?.method || 'GET').toUpperCase().slice(0, 12)
+  const userAgent = safeDiagnosticHeader(request, 'user-agent', 180)
+  const range = safeDiagnosticHeader(request, 'range', 96)
+  const accept = safeDiagnosticHeader(request, 'accept', 120)
+  const cacheControl = safeDiagnosticHeader(request, 'cache-control', 96)
+  const pragma = safeDiagnosticHeader(request, 'pragma', 64)
+  const secFetchMode = safeDiagnosticHeader(request, 'sec-fetch-mode', 32)
+  const secFetchDest = safeDiagnosticHeader(request, 'sec-fetch-dest', 32)
+  const purpose = safeDiagnosticHeader(request, 'purpose', 32) || safeDiagnosticHeader(request, 'sec-purpose', 32)
+  const requestKind = range ? 'range' : 'full'
+  const signatureInput = [
+    method, requestKind, userAgent, range, accept, cacheControl, pragma,
+    secFetchMode, secFetchDest, purpose
+  ].join('\n')
+
+  const probe = {
+    probeVersion: 'request-probe-v1',
+    method,
+    requestKind,
+    requestSignature: createHash('sha256').update(signatureInput, 'utf8').digest('hex').slice(0, 12)
+  }
+  if (userAgent) probe.userAgent = userAgent
+  if (range) probe.range = range
+  if (accept) probe.accept = accept
+  if (cacheControl) probe.cacheControl = cacheControl
+  if (pragma) probe.pragma = pragma
+  if (secFetchMode) probe.secFetchMode = secFetchMode
+  if (secFetchDest) probe.secFetchDest = secFetchDest
+  if (purpose) probe.purpose = purpose
+  return probe
+}
+
 function classifyTranslationError(error) {
   const message = error && error.message ? String(error.message) : String(error || '')
   if (/Gemini HTTP (401|403)/i.test(message)) {
@@ -1476,7 +1519,8 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
     const startedAt = nowMs()
     await recordConfiguredDiagnostic(env, configId, {
       event: 'translation-request',
-      status: 'player'
+      status: 'player',
+      ...translationRequestProbe(request)
     }).catch(() => {})
 
     try {
@@ -1925,4 +1969,4 @@ export default {
   }
 }
 
-export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, normaliseRequestedQueueProfile, queueTranslationProfile, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady, shouldPrefetchAutoResult, playerQueueWaitMaxMs, playerQueueGraceMs, playerQueuePollEarlyMs, playerQueuePollFastStartMs, playerQueuePollLateStartMs, playerQueuePollLateMs, playerQueuePollPlan, deliveryRelayTtlMs, readDeliveryRelay, writeDeliveryRelay, readReadyTranslation, translationPreparingResponse }
+export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, translationRequestProbe, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, normaliseRequestedQueueProfile, queueTranslationProfile, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady, shouldPrefetchAutoResult, playerQueueWaitMaxMs, playerQueueGraceMs, playerQueuePollEarlyMs, playerQueuePollFastStartMs, playerQueuePollLateStartMs, playerQueuePollLateMs, playerQueuePollPlan, deliveryRelayTtlMs, readDeliveryRelay, writeDeliveryRelay, readReadyTranslation, translationPreparingResponse }
