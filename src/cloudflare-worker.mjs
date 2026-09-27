@@ -855,9 +855,16 @@ function normaliseRequestedQueueProfile(value) {
     : ''
 }
 
-function queueTranslationProfile(env, attempts = 1, requestedProfile = '') {
+function normaliseQueueRetryMode(value) {
+  const mode = String(value || '')
+  return mode === 'fast-transient' || mode === 'safe-fallback' ? mode : ''
+}
+
+function queueTranslationProfile(env, attempts = 1, requestedProfile = '', retryMode = '') {
   const attempt = Math.max(1, Number(attempts || 1))
   const requested = normaliseRequestedQueueProfile(requestedProfile)
+  const recovery = normaliseQueueRetryMode(retryMode)
+  if (attempt > 1 && recovery === 'fast-transient') return 'fast-transient-retry'
   if (attempt === 1 && requested === 'user-selected-stable') return 'user-selected-stable'
   if (queueFinalEnabled(env, attempts)) return 'quota-safe-final'
   if (queueParallelEnabled(env, attempts)) return 'parallel-3'
@@ -874,9 +881,16 @@ function queueFailureStage(error) {
   return 'unknown'
 }
 
-function queueTranslationOptions(env, attempts = 1, requestedProfile = '') {
+function queueTranslationOptions(env, attempts = 1, requestedProfile = '', retryMode = '') {
   const retryAttempt = Math.max(1, Number(attempts || 1))
   const requested = normaliseRequestedQueueProfile(requestedProfile)
+  const recovery = normaliseQueueRetryMode(retryMode)
+
+  // A first-attempt abort/timeout is commonly a transient Gemini stall rather than
+  // sustained overload. Retry once with the same normal profile before falling back.
+  if (retryAttempt > 1 && recovery === 'fast-transient') {
+    return queueTranslationOptions(env, 1, requestedProfile, '')
+  }
 
   if (retryAttempt === 1 && requested === 'user-selected-stable') {
     return {
@@ -952,6 +966,8 @@ async function writeQueueJobState(env, cacheKey, value = {}) {
   }
   if (value.configId) clean.configId = String(value.configId).slice(0, 128)
   if (value.attempts !== undefined) clean.attempts = Math.max(0, Number(value.attempts || 0))
+  const retryMode = normaliseQueueRetryMode(value.retryMode)
+  if (retryMode) clean.retryMode = retryMode
 
   await kv.put(
     queueJobKey(cacheKey),
@@ -1185,8 +1201,9 @@ async function processQueueMessage(body, env, options = {}) {
   const queuedAt = Number(payload.queuedAt || 0)
   const queueDelayMs = queuedAt > 0 ? Math.max(0, roundMs(epochNowFn() - queuedAt)) : 0
   const requestedProfile = normaliseRequestedQueueProfile(payload.profile)
-  const queueProfile = queueTranslationOptions(env, attempts, requestedProfile)
-  const queueProfileName = queueTranslationProfile(env, attempts, requestedProfile)
+  let retryMode = ''
+  let queueProfile = null
+  let queueProfileName = ''
 
   if (!secret) throw new Error('SmartSubs server secret is not configured')
   if (payload.v !== 1 || !configToken || !translationToken || !configId) {
@@ -1210,10 +1227,18 @@ async function processQueueMessage(body, env, options = {}) {
     }
     cacheKey = expectedCacheKey
 
+    if (attempts > 1) {
+      const previousJob = await readQueueJobState(env, cacheKey)
+      retryMode = normaliseQueueRetryMode(previousJob?.retryMode)
+    }
+    queueProfile = queueTranslationOptions(env, attempts, requestedProfile, retryMode)
+    queueProfileName = queueTranslationProfile(env, attempts, requestedProfile, retryMode)
+
     await writeQueueJobState(env, cacheKey, {
       state: 'running',
       configId,
-      attempts
+      attempts,
+      retryMode
     }).catch(() => {})
 
     await diagnosticFn(env.SMARTSUBS_CACHE, configId, {
@@ -1221,6 +1246,7 @@ async function processQueueMessage(body, env, options = {}) {
       status: 'consumer',
       attempts,
       profile: queueProfileName,
+      retryMode: retryMode || undefined,
       queueDelayMs,
       chunkItems: queueProfile.maxItems,
       chunkChars: queueProfile.maxChars,
@@ -1257,6 +1283,7 @@ async function processQueueMessage(body, env, options = {}) {
       status: 'ready',
       attempts,
       profile: queueProfileName,
+      retryMode: retryMode || undefined,
       totalMs,
       expected: repair.expected,
       received: repair.received,
@@ -1317,6 +1344,7 @@ async function processQueueMessage(body, env, options = {}) {
       status: 'consumer-failed',
       attempts,
       profile: queueProfileName,
+      retryMode: retryMode || undefined,
       queueDelayMs,
       failureStage: queueFailureStage(error),
       error: safeMessage(error, userConfig?.apiKey || ''),
@@ -1341,6 +1369,53 @@ async function processQueueMessage(body, env, options = {}) {
     throw error
   }
 }
+function queueRetryPolicy(error, attempts = 1) {
+  const attempt = Math.max(1, Number(attempts || 1))
+  const message = String(error?.message || error || '')
+  const failureStage = queueFailureStage(error)
+  const rateLimited = /Gemini HTTP 429/i.test(message)
+  const serverOverload = /Gemini HTTP (408|5\d\d)/i.test(message)
+  const transientAbort = failureStage === 'gemini' && !rateLimited && !serverOverload && /aborted|aborterror|timeout/i.test(message)
+
+  if (attempt === 1 && transientAbort) {
+    return {
+      delaySeconds: 2,
+      retryMode: 'fast-transient',
+      policy: 'fast-transient-retry'
+    }
+  }
+
+  if (rateLimited) {
+    return {
+      delaySeconds: attempt === 1 ? 30 : Math.min(60, attempt * 10),
+      retryMode: 'safe-fallback',
+      policy: 'rate-limit-safe-fallback'
+    }
+  }
+
+  if (serverOverload) {
+    return {
+      delaySeconds: attempt === 1 ? 10 : Math.min(60, attempt * 10),
+      retryMode: 'safe-fallback',
+      policy: 'server-safe-fallback'
+    }
+  }
+
+  if (attempt === 2) {
+    return {
+      delaySeconds: 10,
+      retryMode: 'safe-fallback',
+      policy: 'second-failure-safe-fallback'
+    }
+  }
+
+  return {
+    delaySeconds: Math.min(60, attempt * 10),
+    retryMode: 'safe-fallback',
+    policy: 'standard-safe-fallback'
+  }
+}
+
 async function handleQueue(batch, env, options = {}) {
   const processFn = options.processFn || processQueueMessage
 
@@ -1377,20 +1452,24 @@ async function handleQueue(batch, env, options = {}) {
         if (typeof message.ack === 'function') message.ack()
       } else if (typeof message.retry === 'function') {
         const attempts = Math.max(1, Number(message.attempts || 1))
+        const retryPolicy = queueRetryPolicy(error, attempts)
+        const retryDelaySeconds = retryPolicy.delaySeconds
         if (validTranslationCacheKey(cacheKey)) {
           await writeQueueJobState(messageEnv, cacheKey, {
             state: 'retrying',
             configId,
-            attempts
+            attempts,
+            retryMode: retryPolicy.retryMode
           }).catch(() => {})
         }
-        const retryDelaySeconds = Math.min(60, attempts * 10)
         await recordConfiguredDiagnostic(messageEnv, configId, {
           event: 'queue-retry-scheduled',
           status: 'retrying',
           attempts,
           nextAttempt: attempts + 1,
           retryDelaySeconds,
+          retryMode: retryPolicy.retryMode,
+          retryPolicy: retryPolicy.policy,
           failureStage: queueFailureStage(error),
           reason: safeMessage(error, '')
         }).catch(() => {})
@@ -1969,4 +2048,4 @@ export default {
   }
 }
 
-export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, translationRequestProbe, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, normaliseRequestedQueueProfile, queueTranslationProfile, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady, shouldPrefetchAutoResult, playerQueueWaitMaxMs, playerQueueGraceMs, playerQueuePollEarlyMs, playerQueuePollFastStartMs, playerQueuePollLateStartMs, playerQueuePollLateMs, playerQueuePollPlan, deliveryRelayTtlMs, readDeliveryRelay, writeDeliveryRelay, readReadyTranslation, translationPreparingResponse }
+export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, translationRequestProbe, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, normaliseRequestedQueueProfile, queueTranslationProfile, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueRetryPolicy, normaliseQueueRetryMode, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady, shouldPrefetchAutoResult, playerQueueWaitMaxMs, playerQueueGraceMs, playerQueuePollEarlyMs, playerQueuePollFastStartMs, playerQueuePollLateStartMs, playerQueuePollLateMs, playerQueuePollPlan, deliveryRelayTtlMs, readDeliveryRelay, writeDeliveryRelay, readReadyTranslation, translationPreparingResponse }

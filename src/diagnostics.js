@@ -26,7 +26,7 @@ function sanitiseEvent(event = {}) {
     'englishSelectedScore', 'englishSelectionStable', 'englishTop', 'englishSourceIds',
     'expected', 'received', 'missing', 'retryRecovered', 'fallbackCount', 'final',
     'semanticRetriesUsed', 'chunks', 'geminiCalls', 'rateLimits', 'transientRetries',
-    'retryWaitMs', 'chunkItems', 'chunkChars', 'concurrency', 'attempts', 'waitMs', 'polls', 'joinStatus', 'reason', 'profile', 'delivery',
+    'retryWaitMs', 'chunkItems', 'chunkChars', 'concurrency', 'attempts', 'waitMs', 'polls', 'joinStatus', 'reason', 'profile', 'retryMode', 'retryPolicy', 'delivery',
     'queueDelayMs', 'sourceFetchMs', 'parseMs', 'sourceBytes', 'cueCount', 'pipelineMs',
     'translationWallMs', 'chunkTimeline', 'maxChunkMs', 'avgChunkMs', 'sumChunkMs',
     'geminiCallMs', 'geminiStatuses', 'geminiPromptChars',
