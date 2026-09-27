@@ -12,7 +12,7 @@ test('normal Queue uses 160/20000/5, retry remains 180/24000/2', async () => {
   assert.deepEqual(queueTranslationOptions(env, 1), { maxItems: 160, maxChars: 20000, concurrency: 5 })
   assert.deepEqual(queueTranslationOptions(env, 2), { maxItems: 180, maxChars: 24000, concurrency: 2 })
   assert.equal(env.QUEUE_PARALLEL_CONCURRENCY, '3')
-  assert.equal(env.QUEUE_USER_SELECTED_CONCURRENCY, '3')
+  assert.equal(env.QUEUE_USER_SELECTED_CONCURRENCY, '5')
 })
 
 test('normal five-chunk episode runs up to five Gemini requests at once, with no extra calls', async () => {

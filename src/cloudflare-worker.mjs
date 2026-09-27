@@ -896,7 +896,7 @@ function queueTranslationOptions(env, attempts = 1, requestedProfile = '', retry
     return {
       maxItems: Math.max(140, Math.min(200, Number(env.QUEUE_USER_SELECTED_CHUNK_ITEMS || 160))),
       maxChars: Math.max(16000, Math.min(24000, Number(env.QUEUE_USER_SELECTED_CHUNK_CHARS || 20000))),
-      concurrency: Math.max(1, Math.min(3, Number(env.QUEUE_USER_SELECTED_CONCURRENCY || 3)))
+      concurrency: Math.max(1, Math.min(5, Number(env.QUEUE_USER_SELECTED_CONCURRENCY || 5)))
     }
   }
   if (queueFinalEnabled(env, attempts)) {

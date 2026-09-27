@@ -116,7 +116,7 @@ test('Part 4.2 both player Queue wait paths use the grace window', () => {
 test('Part 4.2 does not change stable translation concurrency', () => {
   const config = JSON.parse(fs.readFileSync('wrangler.jsonc', 'utf8'))
 
-  assert.equal(config.vars.QUEUE_USER_SELECTED_CONCURRENCY, '3')
+  assert.equal(config.vars.QUEUE_USER_SELECTED_CONCURRENCY, '5')
   assert.equal(config.vars.QUEUE_FINAL_CONCURRENCY, '5')
 })
 

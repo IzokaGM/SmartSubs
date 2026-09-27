@@ -245,6 +245,6 @@ test('Part 4 Wrangler keeps background profile and adds isolated fast profile', 
   assert.equal(config.vars.QUEUE_FINAL_CONCURRENCY, '5')
   assert.equal(config.vars.QUEUE_USER_SELECTED_CHUNK_ITEMS, '160')
   assert.equal(config.vars.QUEUE_USER_SELECTED_CHUNK_CHARS, '20000')
-  assert.equal(config.vars.QUEUE_USER_SELECTED_CONCURRENCY, '3')
+  assert.equal(config.vars.QUEUE_USER_SELECTED_CONCURRENCY, '5')
   assert.equal(config.queues.consumers[0].max_concurrency, 1)
 })
