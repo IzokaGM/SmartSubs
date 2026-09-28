@@ -615,7 +615,57 @@ function playerQueuePollLateMs(env) {
   return Math.max(1000, Math.min(10000, Number(env.PLAYER_QUEUE_POLL_LATE_MS || 3000)))
 }
 
-function playerQueuePollPlan(env, job, now = Date.now()) {
+function playerMoviePollStepMs(env) {
+  return Math.max(1000, Math.min(10000, Number(env.PLAYER_MOVIE_POLL_STEP_MS || 7000)))
+}
+
+function playerMoviePollFastStartMs(env) {
+  return Math.max(
+    playerMoviePollStepMs(env),
+    Math.min(30000, Number(env.PLAYER_MOVIE_POLL_FAST_START_MS || 21000))
+  )
+}
+
+function playerMovieQueuePollPlan(env, job, now = Date.now()) {
+  const state = String(job?.state || '')
+  const updatedAt = Number(job?.updatedAt || 0)
+  const fastMs = queueJoinPollMs(env)
+
+  if (state === 'ready') return { pollMs: fastMs, boundaryMs: 0, phase: 'movie-fast' }
+  if (state === 'retrying' || state === 'failed') {
+    return { pollMs: playerQueuePollLateMs(env), boundaryMs: 0, phase: 'movie-retry' }
+  }
+
+  if ((state === 'queued' || state === 'running') && updatedAt > 0) {
+    const ageMs = Math.max(0, Number(now) - updatedAt)
+    const stepMs = playerMoviePollStepMs(env)
+    const fastStartMs = playerMoviePollFastStartMs(env)
+
+    if (ageMs < fastStartMs) {
+      const nextBoundaryMs = Math.min(
+        fastStartMs,
+        Math.max(stepMs, (Math.floor(ageMs / stepMs) + 1) * stepMs)
+      )
+      return {
+        pollMs: stepMs,
+        boundaryMs: Math.max(1, nextBoundaryMs - ageMs),
+        phase: 'movie-sparse'
+      }
+    }
+
+    // Movies normally have more cues/chunks. After 21s, poll tightly so a
+    // translation that completes near the 30s player wait is delivered at once.
+    return { pollMs: fastMs, boundaryMs: 0, phase: 'movie-fast' }
+  }
+
+  return { pollMs: playerMoviePollStepMs(env), boundaryMs: 0, phase: 'movie-sparse' }
+}
+
+function playerQueuePollPlan(env, job, now = Date.now(), mediaType = '') {
+  if (String(mediaType || '').toLowerCase() === 'movie') {
+    return playerMovieQueuePollPlan(env, job, now)
+  }
+
   const state = String(job?.state || '')
   const updatedAt = Number(job?.updatedAt || 0)
   const fastMs = queueJoinPollMs(env)
@@ -649,8 +699,11 @@ function playerQueuePollPlan(env, job, now = Date.now()) {
   return { pollMs: playerQueuePollEarlyMs(env), boundaryMs: 0, phase: 'early' }
 }
 
-function playerQueueWaitMaxMs(env) {
-  return Math.max(2000, Math.min(30000, Number(env.PLAYER_QUEUE_WAIT_MAX_MS || 28000)))
+function playerQueueWaitMaxMs(env, mediaType = '') {
+  if (String(mediaType || '').toLowerCase() === 'movie') {
+    return Math.max(2000, Math.min(34000, Number(env.PLAYER_MOVIE_QUEUE_WAIT_MAX_MS || 33000)))
+  }
+  return Math.max(2000, Math.min(30000, Number(env.PLAYER_QUEUE_WAIT_MAX_MS || 30000)))
 }
 
 function playerQueueGraceMs(env) {
@@ -994,6 +1047,7 @@ async function waitForQueueCache(options = {}) {
   const maxWaitMs = Math.max(0, Number(options.maxWaitMs ?? queueJoinMaxMs(env)))
   const pollMs = Math.max(1, Number(options.pollMs ?? queueJoinPollMs(env)))
   const adaptivePlayerPolling = options.playerAdaptivePolling === true
+  const mediaType = String(options.mediaType || '').toLowerCase()
   const startedAt = nowFn()
   let polls = 0
   let job = options.initialJob || await readQueueJobState(env, cacheKey)
@@ -1005,7 +1059,7 @@ async function waitForQueueCache(options = {}) {
 
     let nextPollMs = pollMs
     if (adaptivePlayerPolling) {
-      const plan = playerQueuePollPlan(env, job, now)
+      const plan = playerQueuePollPlan(env, job, now, mediaType)
       nextPollMs = Math.max(1, Number(plan.pollMs || pollMs))
       if (Number(plan.boundaryMs || 0) > 0) {
         nextPollMs = Math.min(nextPollMs, Math.max(1, Number(plan.boundaryMs)))
@@ -1638,9 +1692,10 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
             cache,
             cacheKey,
             initialJob: job,
-            maxWaitMs: playerQueueWaitMaxMs(env),
+            maxWaitMs: playerQueueWaitMaxMs(env, tokenData.media?.type),
             graceMs: playerQueueGraceMs(env),
-            playerAdaptivePolling: true
+            playerAdaptivePolling: true,
+            mediaType: tokenData.media?.type
           })
 
           joinWaitMs = joined.waitMs
@@ -1712,9 +1767,10 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
             env,
             cache,
             cacheKey,
-            maxWaitMs: playerQueueWaitMaxMs(env),
+            maxWaitMs: playerQueueWaitMaxMs(env, tokenData.media?.type),
             graceMs: playerQueueGraceMs(env),
-            playerAdaptivePolling: true
+            playerAdaptivePolling: true,
+            mediaType: tokenData.media?.type
           })
 
           joinWaitMs = joined.waitMs
@@ -2048,4 +2104,4 @@ export default {
   }
 }
 
-export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, translationRequestProbe, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, normaliseRequestedQueueProfile, queueTranslationProfile, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueRetryPolicy, normaliseQueueRetryMode, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady, shouldPrefetchAutoResult, playerQueueWaitMaxMs, playerQueueGraceMs, playerQueuePollEarlyMs, playerQueuePollFastStartMs, playerQueuePollLateStartMs, playerQueuePollLateMs, playerQueuePollPlan, deliveryRelayTtlMs, readDeliveryRelay, writeDeliveryRelay, readReadyTranslation, translationPreparingResponse }
+export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, translationRequestProbe, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, normaliseRequestedQueueProfile, queueTranslationProfile, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueRetryPolicy, normaliseQueueRetryMode, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady, shouldPrefetchAutoResult, playerQueueWaitMaxMs, playerQueueGraceMs, playerQueuePollEarlyMs, playerQueuePollFastStartMs, playerQueuePollLateStartMs, playerQueuePollLateMs, playerMoviePollStepMs, playerMoviePollFastStartMs, playerMovieQueuePollPlan, playerQueuePollPlan, deliveryRelayTtlMs, readDeliveryRelay, writeDeliveryRelay, readReadyTranslation, translationPreparingResponse }
