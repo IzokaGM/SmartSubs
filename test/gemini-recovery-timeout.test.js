@@ -58,14 +58,13 @@ test('repeated Gemini 503 uses increasing backoff and preserves a successful res
   assert.deepEqual(metrics.geminiStatuses, [503, 503, 200])
 })
 
-test('only an aborted chunk is retried, after jittered 2–5 seconds', async () => {
+test('only an aborted chunk is retried after a fast 1 second delay', async () => {
   const cues = [cue(0), cue(1), cue(2), cue(3)]
   const calls = new Map()
   const sleeps = []
   let summary
   const translated = await translateCues(cues, {
     maxItems: 2, maxChars: 20000, concurrency: 2,
-    jitterFn: () => 0.5,
     sleepFn: async ms => sleeps.push(ms),
     translateTextsFn: async (texts, options) => {
       const id = texts[0]
@@ -81,11 +80,11 @@ test('only an aborted chunk is retried, after jittered 2–5 seconds', async () 
     },
     onTranslationStats: value => { summary = value }
   })
-  assert.deepEqual(sleeps, [3500])
+  assert.deepEqual(sleeps, [1000])
   assert.deepEqual(Object.fromEntries(calls), { 'line-0': 2, 'line-2': 1 })
   assert.deepEqual(translated.map(row => row.text), ['BM:line-0', 'BM:line-1', 'BM:line-2', 'BM:line-3'])
   assert.equal(summary.abortRetries, 1)
-  assert.equal(summary.retryWaitMs, 3500)
+  assert.equal(summary.retryWaitMs, 1000)
 })
 
 test('an explicit zero retry delay remains available for existing test and call-site overrides', async () => {

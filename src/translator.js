@@ -159,6 +159,16 @@ async function requestGemini(prompt, options = {}) {
 
   for (let attempt = 0; ; attempt++) {
     const controller = new AbortController()
+    const externalSignal = options.signal || null
+    let externalAbortReason = ''
+    const abortFromExternal = () => {
+      externalAbortReason = String(externalSignal?.reason || '')
+      controller.abort()
+    }
+    if (externalSignal) {
+      if (externalSignal.aborted) abortFromExternal()
+      else externalSignal.addEventListener('abort', abortFromExternal, { once: true })
+    }
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
     const callStartedAt = metricNow(options)
     let recorded = false
@@ -235,10 +245,12 @@ async function requestGemini(prompt, options = {}) {
 
       throw new Error(`Gemini HTTP ${status}`)
     } catch (error) {
-      recordCall(error?.name === 'AbortError' ? 'ABORT' : 'ERROR')
+      const hedgeCancelled = error?.name === 'AbortError' && externalAbortReason === 'hedge-loser'
+      recordCall(hedgeCancelled ? 'HEDGE_CANCEL' : (error?.name === 'AbortError' ? 'ABORT' : 'ERROR'))
       throw error
     } finally {
       clearTimeout(timeout)
+      if (externalSignal) externalSignal.removeEventListener?.('abort', abortFromExternal)
     }
   }
 }
@@ -383,12 +395,18 @@ async function translateCues(cues, options = {}) {
     transientRetries: 0,
     abortRetries: 0,
     retryWaitMs: 0,
+    hedgeStarts: 0,
+    hedgeReplicaWins: 0,
+    hedgeCancels: 0,
     geminiCallMs: [],
     geminiStatuses: [],
     geminiPromptChars: [],
     geminiFinishReasons: [],
     geminiOutputTokens: []
   }
+  const mediaType = String(options.mediaType || '').toLowerCase()
+  const movieHedgeEnabled = mediaType === 'movie' && options.movieHedgeEnabled !== false
+  const movieHedgeDelayMs = Math.max(0, Number(options.movieHedgeDelayMs ?? 35000) || 0)
 
   function perfSnapshot() {
     const completed = chunkMs.filter(Number.isFinite)
@@ -411,7 +429,10 @@ async function translateCues(cues, options = {}) {
       geminiStatuses: Array.isArray(requestMetrics.geminiStatuses) ? requestMetrics.geminiStatuses : [],
       geminiPromptChars: Array.isArray(requestMetrics.geminiPromptChars) ? requestMetrics.geminiPromptChars : [],
       geminiFinishReasons: Array.isArray(requestMetrics.geminiFinishReasons) ? requestMetrics.geminiFinishReasons : [],
-      geminiOutputTokens: Array.isArray(requestMetrics.geminiOutputTokens) ? requestMetrics.geminiOutputTokens : []
+      geminiOutputTokens: Array.isArray(requestMetrics.geminiOutputTokens) ? requestMetrics.geminiOutputTokens : [],
+      hedgeStarts: Number(requestMetrics.hedgeStarts || 0),
+      hedgeReplicaWins: Number(requestMetrics.hedgeReplicaWins || 0),
+      hedgeCancels: Number(requestMetrics.hedgeCancels || 0)
     }
   }
 
@@ -430,10 +451,11 @@ async function translateCues(cues, options = {}) {
 
       // A failed full-chunk attempt must not overwrite the stats of a later
       // successful recovery (or leak a partial result into the VTT).
-      async function translatePart(part) {
+      async function runPart(part, extraOptions = {}) {
         let partStats = null
         const translatedPart = await translateFn(part, {
           ...options,
+          ...extraOptions,
           requestMetrics,
           onTranslationStats: stats => { partStats = stats }
         })
@@ -441,6 +463,77 @@ async function translateCues(cues, options = {}) {
           throw new Error(`Gemini translation count mismatch: expected ${part.length}, got ${translatedPart?.length ?? 'none'}`)
         }
         return { texts: translatedPart, stats: partStats }
+      }
+
+      async function translatePart(part) {
+        if (!movieHedgeEnabled || movieHedgeDelayMs <= 0) {
+          return runPart(part)
+        }
+
+        const settle = promise => Promise.resolve(promise).then(
+          value => ({ ok: true, value }),
+          error => ({ ok: false, error })
+        )
+        const primaryController = new AbortController()
+        const primary = settle(runPart(part, { signal: primaryController.signal }))
+        let hedgeTimer = null
+        const hedgeGate = new Promise(resolve => {
+          hedgeTimer = setTimeout(() => resolve({ hedge: true }), movieHedgeDelayMs)
+        })
+
+        const first = await Promise.race([
+          primary.then(result => ({ hedge: false, result })),
+          hedgeGate
+        ])
+
+        if (!first.hedge) {
+          if (hedgeTimer) clearTimeout(hedgeTimer)
+          if (first.result.ok) return first.result.value
+          throw first.result.error
+        }
+
+        requestMetrics.hedgeStarts = Number(requestMetrics.hedgeStarts || 0) + 1
+        const replicaController = new AbortController()
+        const replica = settle(runPart(part, { signal: replicaController.signal }))
+        const never = new Promise(() => {})
+        const primaryEvent = primary.then(result => ({ source: 'primary', result }))
+        const replicaEvent = replica.then(result => ({ source: 'replica', result }))
+        let primaryDone = false
+        let replicaDone = false
+        let primaryFailure = null
+        let replicaFailure = null
+
+        while (!primaryDone || !replicaDone) {
+          const event = await Promise.race([
+            primaryDone ? never : primaryEvent,
+            replicaDone ? never : replicaEvent
+          ])
+
+          if (event.source === 'primary') {
+            primaryDone = true
+            if (event.result.ok) {
+              if (!replicaDone) {
+                requestMetrics.hedgeCancels = Number(requestMetrics.hedgeCancels || 0) + 1
+                replicaController.abort('hedge-loser')
+              }
+              return event.result.value
+            }
+            primaryFailure = event.result.error
+          } else {
+            replicaDone = true
+            if (event.result.ok) {
+              requestMetrics.hedgeReplicaWins = Number(requestMetrics.hedgeReplicaWins || 0) + 1
+              if (!primaryDone) {
+                requestMetrics.hedgeCancels = Number(requestMetrics.hedgeCancels || 0) + 1
+                primaryController.abort('hedge-loser')
+              }
+              return event.result.value
+            }
+            replicaFailure = event.result.error
+          }
+        }
+
+        throw replicaFailure || primaryFailure || new Error('Gemini hedged translation failed')
       }
 
       let abortRetriesForChunk = 0
@@ -476,11 +569,10 @@ async function translateCues(cues, options = {}) {
             }
 
             abortRetriesForChunk++
-            // Preserve the existing 45s timeout and 2–5s retry backoff.
+            // A hard timeout has already consumed up to 45s. Retry only the
+            // failed chunk quickly; HTTP 503/429 still use request/Queue backoff.
             const waitMs = options.abortRetryDelayMs === undefined
-              ? 2000 + Math.floor(
-                Math.min(1, Math.max(0, Number((options.jitterFn || Math.random)()) || 0)) * 3000
-              )
+              ? 1000
               : Math.max(0, Math.min(15000, Number(options.abortRetryDelayMs) || 0))
             requestMetrics.abortRetries = Number(requestMetrics.abortRetries || 0) + 1
             requestMetrics.transientRetries = Number(requestMetrics.transientRetries || 0) + 1
@@ -536,6 +628,9 @@ async function translateCues(cues, options = {}) {
       transientRetries: Number(requestMetrics.transientRetries || 0),
       abortRetries: Number(requestMetrics.abortRetries || 0),
       retryWaitMs: Number(requestMetrics.retryWaitMs || 0),
+      hedgeStarts: Number(requestMetrics.hedgeStarts || 0),
+      hedgeReplicaWins: Number(requestMetrics.hedgeReplicaWins || 0),
+      hedgeCancels: Number(requestMetrics.hedgeCancels || 0),
       recoverySplits,
       chunkItems: plan.maxItems,
       chunkChars: plan.maxChars,

@@ -548,6 +548,9 @@ async function prefetchTranslation(options = {}) {
       transientRetries: repair.transientRetries,
       abortRetries: repair.abortRetries,
       retryWaitMs: repair.retryWaitMs,
+      hedgeStarts: repair.hedgeStarts,
+      hedgeReplicaWins: repair.hedgeReplicaWins,
+      hedgeCancels: repair.hedgeCancels,
       chunkItems: repair.chunkItems,
       chunkChars: repair.chunkChars,
       concurrency: repair.concurrency
@@ -704,6 +707,16 @@ function playerQueueWaitMaxMs(env, mediaType = '') {
     return Math.max(2000, Math.min(34000, Number(env.PLAYER_MOVIE_QUEUE_WAIT_MAX_MS || 33000)))
   }
   return Math.max(2000, Math.min(30000, Number(env.PLAYER_QUEUE_WAIT_MAX_MS || 30000)))
+}
+
+function geminiChunkAbortRetryMs(env) {
+  return Math.max(0, Math.min(5000, Number(env.GEMINI_CHUNK_ABORT_RETRY_MS ?? 1000) || 0))
+}
+function movieGeminiHedgeEnabled(env) {
+  return !['0', 'false', 'off', 'no'].includes(String(env.GEMINI_MOVIE_HEDGE_ENABLED ?? 'true').toLowerCase())
+}
+function movieGeminiHedgeDelayMs(env) {
+  return Math.max(20000, Math.min(44000, Number(env.GEMINI_MOVIE_HEDGE_DELAY_MS || 35000)))
 }
 
 function playerQueueGraceMs(env) {
@@ -1316,7 +1329,13 @@ async function processQueueMessage(body, env, options = {}) {
       model: userConfig.model,
       apiKey: userConfig.apiKey,
       cacheVersion: cacheVersion(env),
-      translateOptions: queueProfile
+      translateOptions: queueProfile,
+      translateContext: {
+        mediaType: tokenData.media?.type,
+        abortRetryDelayMs: geminiChunkAbortRetryMs(env),
+        movieHedgeEnabled: movieGeminiHedgeEnabled(env),
+        movieHedgeDelayMs: movieGeminiHedgeDelayMs(env)
+      }
     })
 
     env.__kvUsageTracker?.setCacheResult(result.status)
@@ -1352,6 +1371,9 @@ async function processQueueMessage(body, env, options = {}) {
       transientRetries: repair.transientRetries,
       abortRetries: repair.abortRetries,
       retryWaitMs: repair.retryWaitMs,
+      hedgeStarts: repair.hedgeStarts,
+      hedgeReplicaWins: repair.hedgeReplicaWins,
+      hedgeCancels: repair.hedgeCancels,
       chunkItems: repair.chunkItems,
       chunkChars: repair.chunkChars,
       concurrency: repair.concurrency,
@@ -1414,6 +1436,9 @@ async function processQueueMessage(body, env, options = {}) {
       avgChunkMs: perf.avgChunkMs,
       sumChunkMs: perf.sumChunkMs,
       abortRetries: perf.abortRetries,
+      hedgeStarts: perf.hedgeStarts,
+      hedgeReplicaWins: perf.hedgeReplicaWins,
+      hedgeCancels: perf.hedgeCancels,
       geminiCallMs: perf.geminiCallMs,
       geminiStatuses: perf.geminiStatuses,
       geminiPromptChars: perf.geminiPromptChars,

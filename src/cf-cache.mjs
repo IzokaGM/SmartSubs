@@ -116,6 +116,9 @@ export async function cfGetOrTranslate(options = {}) {
   const translateOptions = options.translateOptions && typeof options.translateOptions === 'object'
     ? options.translateOptions
     : {}
+  const translateContext = options.translateContext && typeof options.translateContext === 'object'
+    ? options.translateContext
+    : {}
   if (!cache) throw new Error('Translation cache is required')
   if (!upstreamUrl) throw new Error('Subtitle source URL is required')
   if (!model) throw new Error('Translation model is required')
@@ -141,6 +144,7 @@ export async function cfGetOrTranslate(options = {}) {
     let translationStats = null
     const vtt = await translateFn(upstreamUrl, {
       ...translateOptions,
+      ...translateContext,
       apiKey,
       model,
       onTranslationStats: stats => { translationStats = stats }
