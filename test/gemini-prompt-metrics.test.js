@@ -14,7 +14,7 @@ const responseBody = (translations, finishReason = 'STOP', tokenCount = 54) => (
   usageMetadata: { candidatesTokenCount: tokenCount }
 })
 
-test('compact prompt keeps Malaysian Malay, cue integrity and schema while reducing fixed characters', () => {
+test('compact prompt keeps Bahasa Melayu Malaysia, cue integrity and JSON output while reducing fixed characters', () => {
   const text = buildIndexedPrompt(source)
   const originalFixed = [
     'Translate these English subtitles into natural Malaysian Bahasa Melayu, following professional TV and streaming subtitle style.',
@@ -25,11 +25,11 @@ test('compact prompt keeps Malaysian Malay, cue integrity and schema while reduc
     'Return exactly one translated object for each input id, preserving all ids and their original order. Do not merge, split, omit or add cues. Output only the required JSON.'
   ].join('\n')
   assert.ok(text.length < originalFixed.length + JSON.stringify(source).length)
-  assert.match(text, /Malaysian Bahasa Melayu/)
+  assert.match(text, /Bahasa Melayu Malaysia/)
   assert.match(text, /meaning, tone, emotion/)
   assert.match(text, /speaker markers and formatting tags/)
-  assert.match(text, /one nonempty translated object per input id/)
-  assert.match(text, /original order/)
+  assert.match(text, /exactly one non-empty translation for every input id/)
+  assert.match(text, /preserving ids and order/)
   assert.deepEqual(JSON.parse(text.split('\n').at(-1)), source)
 })
 
