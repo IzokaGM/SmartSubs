@@ -718,6 +718,16 @@ function movieGeminiHedgeEnabled(env) {
 function movieGeminiHedgeDelayMs(env) {
   return Math.max(20000, Math.min(44000, Number(env.GEMINI_MOVIE_HEDGE_DELAY_MS || 35000)))
 }
+function movieAdaptiveTargetChunks(env) {
+  return Math.max(6, Math.min(16, Number(env.QUEUE_MOVIE_TARGET_CHUNKS || 10)))
+}
+function movieAdaptiveChunkItemsMin(env) {
+  return Math.max(120, Math.min(200, Number(env.QUEUE_MOVIE_CHUNK_ITEMS_MIN || 160)))
+}
+function movieAdaptiveChunkItemsMax(env) {
+  const minItems = movieAdaptiveChunkItemsMin(env)
+  return Math.max(minItems, Math.min(240, Number(env.QUEUE_MOVIE_CHUNK_ITEMS_MAX || 200)))
+}
 
 function playerQueueGraceMs(env) {
   return Math.max(0, Math.min(1000, Number(env.PLAYER_QUEUE_GRACE_MS || 600)))
@@ -1332,6 +1342,10 @@ async function processQueueMessage(body, env, options = {}) {
       translateOptions: queueProfile,
       translateContext: {
         mediaType: tokenData.media?.type,
+        movieAdaptiveChunking: tokenData.media?.type === 'movie' && queueProfileName !== 'fallback-stable',
+        movieTargetChunks: movieAdaptiveTargetChunks(env),
+        movieChunkItemsMin: movieAdaptiveChunkItemsMin(env),
+        movieChunkItemsMax: movieAdaptiveChunkItemsMax(env),
         abortRetryDelayMs: geminiChunkAbortRetryMs(env),
         movieHedgeEnabled: movieGeminiHedgeEnabled(env),
         movieHedgeDelayMs: movieGeminiHedgeDelayMs(env)
@@ -2129,4 +2143,4 @@ export default {
   }
 }
 
-export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, translationRequestProbe, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, normaliseRequestedQueueProfile, queueTranslationProfile, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueRetryPolicy, normaliseQueueRetryMode, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady, shouldPrefetchAutoResult, playerQueueWaitMaxMs, playerQueueGraceMs, playerQueuePollEarlyMs, playerQueuePollFastStartMs, playerQueuePollLateStartMs, playerQueuePollLateMs, playerMoviePollStepMs, playerMoviePollFastStartMs, playerMovieQueuePollPlan, playerQueuePollPlan, deliveryRelayTtlMs, readDeliveryRelay, writeDeliveryRelay, readReadyTranslation, translationPreparingResponse }
+export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, translationRequestProbe, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, normaliseRequestedQueueProfile, queueTranslationProfile, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueRetryPolicy, normaliseQueueRetryMode, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady, shouldPrefetchAutoResult, playerQueueWaitMaxMs, playerQueueGraceMs, playerQueuePollEarlyMs, playerQueuePollFastStartMs, playerQueuePollLateStartMs, playerQueuePollLateMs, playerMoviePollStepMs, playerMoviePollFastStartMs, playerMovieQueuePollPlan, playerQueuePollPlan, movieAdaptiveTargetChunks, movieAdaptiveChunkItemsMin, movieAdaptiveChunkItemsMax, deliveryRelayTtlMs, readDeliveryRelay, writeDeliveryRelay, readReadyTranslation, translationPreparingResponse }

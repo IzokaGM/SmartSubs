@@ -89,9 +89,19 @@ function createTranslationPlan(cues, options = {}) {
     Math.min(5, Number(config.translationConcurrency || 2))
   )
 
-  const maxItems = Number.isFinite(explicitItems) && explicitItems > 0
+  let maxItems = Number.isFinite(explicitItems) && explicitItems > 0
     ? explicitItems
     : configuredItems
+
+  const mediaType = String(options.mediaType || '').toLowerCase()
+  const movieAdaptiveChunking = mediaType === 'movie' && options.movieAdaptiveChunking === true
+  if (movieAdaptiveChunking && rows.length) {
+    const targetChunks = Math.max(6, Math.min(16, Number(options.movieTargetChunks || 10)))
+    const minItems = Math.max(120, Math.min(200, Number(options.movieChunkItemsMin || 160)))
+    const maxAdaptiveItems = Math.max(minItems, Math.min(240, Number(options.movieChunkItemsMax || 200)))
+    const targetItems = Math.ceil(rows.length / targetChunks)
+    maxItems = Math.max(minItems, Math.min(maxAdaptiveItems, targetItems))
+  }
 
   const maxChars = Number.isFinite(explicitChars) && explicitChars > 0
     ? explicitChars
