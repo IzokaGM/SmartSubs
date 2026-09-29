@@ -14,22 +14,19 @@ const responseBody = (translations, finishReason = 'STOP', tokenCount = 54) => (
   usageMetadata: { candidatesTokenCount: tokenCount }
 })
 
-test('compact prompt keeps Bahasa Melayu Malaysia, cue integrity and JSON output while reducing fixed characters', () => {
+test('structured prompt keeps Bahasa Melayu Malaysia, cue integrity and JSON output', () => {
   const text = buildIndexedPrompt(source)
-  const originalFixed = [
-    'Translate these English subtitles into natural Malaysian Bahasa Melayu, following professional TV and streaming subtitle style.',
-    'Use concise, fluent, conversational Malay. Avoid literal translation, stiff or overly formal language, unintended Indonesian phrasing and unnecessary local slang.',
-    'Preserve meaning, tone, emotion and character relationships. Adapt expressions naturally without adding, omitting or softening important meaning.',
-    'Keep dialogue short and easy to read. Choose pronouns and vocabulary from context; stay consistent across related cues.',
-    'Preserve names, numbers, speaker markers and formatting tags. Use natural line breaks and no more than two lines per cue where practical.',
-    'Return exactly one translated object for each input id, preserving all ids and their original order. Do not merge, split, omit or add cues. Output only the required JSON.'
-  ].join('\n')
-  assert.ok(text.length < originalFixed.length + JSON.stringify(source).length)
+  assert.match(text, /^You are a subtitle translator\./)
+  assert.match(text, /\nTask:\n/)
+  assert.match(text, /\nTranslation rules:\n/)
   assert.match(text, /Bahasa Melayu Malaysia/)
   assert.match(text, /meaning, tone, emotion/)
-  assert.match(text, /speaker markers and formatting tags/)
+  assert.match(text, /speaker labels and formatting tags/)
+  assert.match(text, /never use Indonesian/)
+  assert.match(text, /explicit religious\/cultural expressions from the source/)
+  assert.match(text, /\nOutput rules:\n/)
   assert.match(text, /exactly one non-empty translation for every input id/)
-  assert.match(text, /preserving ids and order/)
+  assert.match(text, /Preserve ids and order/)
   assert.deepEqual(JSON.parse(text.split('\n').at(-1)), source)
 })
 
