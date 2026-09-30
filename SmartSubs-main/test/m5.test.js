@@ -1,0 +1,59 @@
+'use strict'
+
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const { createTranslationToken, decodeTranslationToken } = require('../src/token')
+const { parseTimedCues, translateTexts, cuesToVtt } = require('../src/translator')
+const { buildAutoSubtitle } = require('../src/subtitles')
+const crypto = require('node:crypto')
+
+test('M5 signs and verifies translation URLs', () => {
+  const secret = 'test-secret'
+  const source = 'https://example.com/subtitle.srt?x=1'
+  const token = createTranslationToken(source, secret)
+  assert.equal(decodeTranslationToken(token, secret), source)
+  assert.throws(() => decodeTranslationToken(`${token}x`, secret))
+})
+
+test('M5 parses SRT timestamps and emits valid WebVTT shell', () => {
+  const source = `1\n00:00:01,000 --> 00:00:03,500\nHello there.\n\n2\n00:00:04,000 --> 00:00:05,000\nHow are you?\n`
+  const cues = parseTimedCues(source)
+  assert.equal(cues.length, 2)
+  assert.equal(cues[0].time, '00:00:01.000 --> 00:00:03.500')
+  assert.match(cuesToVtt(cues), /^WEBVTT/)
+})
+
+test('M5 calls Gemini with API key header and consumes structured translations', async () => {
+  let seenHeader = null
+  const fakeFetch = async (_url, init) => {
+    seenHeader = init.headers['x-goog-api-key']
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: JSON.stringify({ translations: ['Hai.', 'Apa khabar?'] }) }] } }]
+      })
+    }
+  }
+  const output = await translateTexts(['Hi.', 'How are you?'], {
+    apiKey: 'fake-key',
+    model: 'gemini-test',
+    fetchImpl: fakeFetch
+  })
+
+  assert.equal(seenHeader, 'fake-key')
+  assert.deepEqual(output, ['Hai.', 'Apa khabar?'])
+})
+
+test('M5 creates Gemini Malay track with stable source hash and unchanged signed delivery URL', () => {
+  const result = buildAutoSubtitle(
+    { id: 'eng1', lang: 'eng', url: 'https://example.com/en.srt' },
+    { publicBaseUrl: 'https://smartsubs.example', tokenSecret: 'secret-value' }
+  )
+  const sourceUrl = 'https://example.com/en.srt'
+  const shortId = crypto.createHash('sha1').update(sourceUrl).digest('hex').slice(0, 12)
+  assert.equal(result.id, `smartsubs-gemini-${shortId}`)
+  assert.equal(result.lang, 'msa')
+  assert.equal(result.url, `https://smartsubs.example/translated/${createTranslationToken(sourceUrl, 'secret-value', 'eng1')}.vtt`)
+  assert.equal(result.url.includes('secret-value'), false)
+})

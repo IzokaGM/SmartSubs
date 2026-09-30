@@ -1,0 +1,20 @@
+'use strict'
+
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const { renderConfigurePage } = require('../src/configure')
+
+test('SmartSubs configure result shows install and diagnose actions', () => {
+  const html = renderConfigurePage({
+    secretReady: true,
+    model: 'gemini-3.5-flash-lite',
+    manifestUrl: 'https://smartsubs.example/c/private/manifest.json',
+    installUrl: 'stremio://smartsubs.example/c/private/manifest.json',
+    diagnoseUrl: 'https://smartsubs.example/c/private/diagnose'
+  })
+
+  assert.match(html, /SmartSubs is configured/)
+  assert.match(html, /Install in Stremio/)
+  assert.match(html, /Open Diagnose/)
+  assert.match(html, /https:\/\/smartsubs\.example\/c\/private\/diagnose/)
+})
