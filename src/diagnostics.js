@@ -32,7 +32,9 @@ function sanitiseEvent(event = {}) {
     'geminiCallMs', 'geminiStatuses', 'geminiPromptChars',
     'geminiFinishReasons', 'geminiOutputTokens', 'failureStage',
     'retryDelaySeconds', 'nextAttempt', 'abortRetries',
-    'hedgeStarts', 'hedgeReplicaWins', 'hedgeCancels'
+    'hedgeStarts', 'hedgeReplicaWins', 'hedgeCancels',
+    'mediaType', 'movieAdaptiveChunking', 'movieTargetChunks',
+    'movieChunkItemsMin', 'movieChunkItemsMax'
   ]
   for (const key of allowed) {
     const value = event[key]

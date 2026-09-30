@@ -629,6 +629,10 @@ function playerMoviePollFastStartMs(env) {
   )
 }
 
+function playerMoviePollLateMs(env) {
+  return Math.max(1000, Math.min(10000, Number(env.PLAYER_MOVIE_POLL_LATE_MS || 3000)))
+}
+
 function playerMovieQueuePollPlan(env, job, now = Date.now()) {
   const state = String(job?.state || '')
   const updatedAt = Number(job?.updatedAt || 0)
@@ -656,9 +660,9 @@ function playerMovieQueuePollPlan(env, job, now = Date.now()) {
       }
     }
 
-    // Movies normally have more cues/chunks. After 21s, poll tightly so a
-    // translation that completes near the 30s player wait is delivered at once.
-    return { pollMs: fastMs, boundaryMs: 0, phase: 'movie-fast' }
+    // Movies normally have more cues/chunks. After 21s, reduce KV polling
+    // while keeping the 33s movie long-poll responsive.
+    return { pollMs: playerMoviePollLateMs(env), boundaryMs: 0, phase: 'movie-late' }
   }
 
   return { pollMs: playerMoviePollStepMs(env), boundaryMs: 0, phase: 'movie-sparse' }
@@ -1325,6 +1329,11 @@ async function processQueueMessage(body, env, options = {}) {
       profile: queueProfileName,
       retryMode: retryMode || undefined,
       queueDelayMs,
+      mediaType: tokenData.media?.type,
+      movieAdaptiveChunking: tokenData.media?.type === 'movie' && queueProfileName !== 'fallback-stable',
+      movieTargetChunks: movieAdaptiveTargetChunks(env),
+      movieChunkItemsMin: movieAdaptiveChunkItemsMin(env),
+      movieChunkItemsMax: movieAdaptiveChunkItemsMax(env),
       chunkItems: queueProfile.maxItems,
       chunkChars: queueProfile.maxChars,
       concurrency: queueProfile.concurrency
@@ -1388,6 +1397,11 @@ async function processQueueMessage(body, env, options = {}) {
       hedgeStarts: repair.hedgeStarts,
       hedgeReplicaWins: repair.hedgeReplicaWins,
       hedgeCancels: repair.hedgeCancels,
+      mediaType: tokenData.media?.type,
+      movieAdaptiveChunking: tokenData.media?.type === 'movie' && queueProfileName !== 'fallback-stable',
+      movieTargetChunks: movieAdaptiveTargetChunks(env),
+      movieChunkItemsMin: movieAdaptiveChunkItemsMin(env),
+      movieChunkItemsMax: movieAdaptiveChunkItemsMax(env),
       chunkItems: repair.chunkItems,
       chunkChars: repair.chunkChars,
       concurrency: repair.concurrency,
@@ -2143,4 +2157,4 @@ export default {
   }
 }
 
-export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, translationRequestProbe, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, normaliseRequestedQueueProfile, queueTranslationProfile, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueRetryPolicy, normaliseQueueRetryMode, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady, shouldPrefetchAutoResult, playerQueueWaitMaxMs, playerQueueGraceMs, playerQueuePollEarlyMs, playerQueuePollFastStartMs, playerQueuePollLateStartMs, playerQueuePollLateMs, playerMoviePollStepMs, playerMoviePollFastStartMs, playerMovieQueuePollPlan, playerQueuePollPlan, movieAdaptiveTargetChunks, movieAdaptiveChunkItemsMin, movieAdaptiveChunkItemsMax, deliveryRelayTtlMs, readDeliveryRelay, writeDeliveryRelay, readReadyTranslation, translationPreparingResponse }
+export { BUILD_ID, handleRequest, parseSubtitleArgs, safeMessage, translationRequestProbe, classifyTranslationError, renderConfiguredDiagnosePage, prefetchTranslation, parseAutoTranslationToken, enqueuePrefetchTranslation, processQueueMessage, handleQueue, normaliseRequestedQueueProfile, queueTranslationProfile, queueTranslationOptions, translationCacheKey, readQueueJobState, writeQueueJobState, queueJobActive, waitForQueueCache, queueFailureStage, queueRetryPolicy, normaliseQueueRetryMode, queueFinalEnabled, rateLimitAllowed, rateLimitedResponse, publicReady, shouldPrefetchAutoResult, playerQueueWaitMaxMs, playerQueueGraceMs, playerQueuePollEarlyMs, playerQueuePollFastStartMs, playerQueuePollLateStartMs, playerQueuePollLateMs, playerMoviePollStepMs, playerMoviePollFastStartMs, playerMoviePollLateMs, playerMovieQueuePollPlan, playerQueuePollPlan, movieAdaptiveTargetChunks, movieAdaptiveChunkItemsMin, movieAdaptiveChunkItemsMax, deliveryRelayTtlMs, readDeliveryRelay, writeDeliveryRelay, readReadyTranslation, translationPreparingResponse }
