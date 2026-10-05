@@ -61,7 +61,7 @@ test('Native Malay does not suppress Malay AI; prefetch retains existing native 
       onDiagnostic:async e=>events.push(e)})
     assert.equal(result.subtitles.length,2)
     assert.equal(result.subtitles[0].id,nativeId)
-    assert.match(result.subtitles[1].id,/^smartsubs-gemini-/)
+    assert.match(result.subtitles[1].id,/^gemini-ai-/)
     assert.equal(result.autoPrefetch,false)
     const event=events.find(e=>e.event==='subtitle-result')
     assert.equal(event.autoReady,true)

@@ -46,10 +46,14 @@ function buildAutoSubtitle(englishSubtitle, options = {}) {
   const tokenSecret = options.tokenSecret ?? config.tokenSecret
   if (!englishSubtitle || !publicBaseUrl || !tokenSecret) return null
   const token = createTranslationToken(englishSubtitle.url, tokenSecret, englishSubtitle.id, options.media)
-  const shortId = crypto.createHash('sha1').update(englishSubtitle.url).digest('hex').slice(0, 12)
-  // Keep the stable subtitle ID and URL format for compatibility with existing players/cache.
+  const upstreamId = englishSubtitle.id ?? englishSubtitle.file_id ?? englishSubtitle.fileId
+    ?? englishSubtitle.subtitle_id ?? englishSubtitle.subtitleId
+  const sourceId = upstreamId == null || String(upstreamId).trim() === ''
+    ? crypto.createHash('sha1').update(englishSubtitle.url).digest('hex').slice(0, 12)
+    : String(upstreamId).trim()
+  // Visible track ID identifies the exact upstream subtitle source. Delivery URL/token stay unchanged.
   return {
-    id: `smartsubs-gemini-${shortId}`,
+    id: `gemini-ai-${sourceId}`,
     url: `${String(publicBaseUrl).replace(/\/+$/, '')}/translated/${token}.vtt`,
     lang: 'msa'
   }

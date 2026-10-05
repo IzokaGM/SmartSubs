@@ -35,7 +35,7 @@ test('native Malay and Malay AI are both offered regardless of metadata; existin
     const result = await handleSubtitles({ ...args, extra }, options([native, first], e => events.push(e)))
     assert.deepEqual(result.subtitles.map(item => item.lang), ['msa', 'msa', 'eng'])
     assert.equal(result.subtitles[0].id, 'ms-1')
-    assert.match(result.subtitles[1].id, /^smartsubs-gemini-/)
+    assert.match(result.subtitles[1].id, /^gemini-ai-/)
     assert.equal(result.autoPrefetch, false)
     assert.equal(events.find(e => e.event === 'subtitle-result').autoReady, true)
   }
