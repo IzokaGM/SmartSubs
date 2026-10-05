@@ -30,18 +30,26 @@ function sanitiseEvent(event = {}) {
     'queueDelayMs', 'sourceFetchMs', 'parseMs', 'sourceBytes', 'cueCount', 'pipelineMs',
     'translationWallMs', 'chunkTimeline', 'maxChunkMs', 'avgChunkMs', 'sumChunkMs',
     'geminiCallMs', 'geminiStatuses', 'geminiPromptChars',
-    'geminiFinishReasons', 'geminiInputTokens', 'geminiOutputTokens', 'geminiTotalTokens', 'failureStage',
+    'geminiFinishReasons', 'geminiInputTokens', 'geminiOutputTokens', 'geminiTotalTokens',
+    'geminiInputTokensTotal', 'geminiOutputTokensTotal', 'geminiTotalTokensTotal',
+    'sdhRemoved', 'failureStage',
     'retryDelaySeconds', 'nextAttempt', 'abortRetries',
     'hedgeStarts', 'hedgeReplicaWins', 'hedgeCancels',
     'mediaType', 'movieAdaptiveChunking', 'movieTargetChunks',
     'movieChunkItemsMin', 'movieChunkItemsMax'
   ]
+  const fullGeminiArrays = new Set([
+    'geminiCallMs', 'geminiStatuses', 'geminiPromptChars',
+    'geminiFinishReasons', 'geminiInputTokens', 'geminiOutputTokens', 'geminiTotalTokens'
+  ])
   for (const key of allowed) {
     const value = event[key]
     if (value === undefined) continue
     if (typeof value === 'boolean' || typeof value === 'number') output[key] = value
-    else if (Array.isArray(value)) output[key] = value.slice(0, 8).map(item => safeText(item, 32))
-    else output[key] = safeText(value)
+    else if (Array.isArray(value)) {
+      const items = fullGeminiArrays.has(key) ? value : value.slice(0, 8)
+      output[key] = items.map(item => safeText(item, 32))
+    } else output[key] = safeText(value)
   }
   return output
 }

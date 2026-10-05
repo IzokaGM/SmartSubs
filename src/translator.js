@@ -24,6 +24,68 @@ function parseTimedCues(source) {
   return cues
 }
 
+
+const SDH_VOCAL_RE = /\b(?:pant(?:s|ing)?|breath(?:es|ing|lessly|heavily)?|sigh(?:s|ing)?|gasp(?:s|ing)?|laugh(?:s|ing|ter)?|chuckle(?:s|d|ing)?|giggle(?:s|d|ing)?|groan(?:s|ed|ing)?|grunt(?:s|ed|ing)?|sob(?:s|bing|bed)?|cry(?:ing|ies)?|cough(?:s|ed|ing)?|sneez(?:e|es|ed|ing)|scream(?:s|ed|ing)?|shriek(?:s|ed|ing)?|whimper(?:s|ed|ing)?|moan(?:s|ed|ing)?|hum(?:s|med|ming)?|sniff(?:s|ed|ing)?|clears?\s+(?:his|her|their)?\s*throat)\b/i
+const SDH_MUSIC_RE = /\b(?:music|musical\s+score|score|theme\s+music|song\s+playing|instrumental|singing|humming)\b/i
+const SDH_AMBIENT_STANDALONE_RE = /\b(?:applause|clapping|footsteps?|knocking|gunshots?|thunder|sirens?|beeping|buzzing|rustling|static|explosions?|barking|chirping)\b/i
+const SDH_AMBIENT_SUBJECT_RE = /\b(?:door|doors|phone|telephone|cellphone|bell|alarm|footstep|footsteps|knock|knocking|gunshot|gunshots|thunder|applause|clapping|engine|engines|tire|tires|tyre|tyres|horn|sirens?|beep|beeping|buzz|buzzing|rustling|wind|rain|glass|crowd|car|vehicle|dog|dogs|bird|birds)\b/i
+const SDH_AMBIENT_ACTION_RE = /\b(?:open(?:s|ing)?|close(?:s|d|ing)?|ring(?:s|ing)?|sound(?:s|ing)?|blow(?:s|ing)?|rev(?:s|ving)?|screech(?:es|ing)?|crash(?:es|ed|ing)?|beep(?:s|ing)?|buzz(?:es|ing)?|rustl(?:es|ing)?|shatter(?:s|ed|ing)?|cheer(?:s|ing)?|chant(?:s|ing)?|roar(?:s|ing)?|rumbl(?:es|ing)?|honk(?:s|ing)?|bark(?:s|ing)?|chirp(?:s|ing)?)\b/i
+
+function isSdhDescription(label) {
+  const value = String(label == null ? '' : label)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!value) return false
+  if (SDH_MUSIC_RE.test(value) || SDH_VOCAL_RE.test(value) || SDH_AMBIENT_STANDALONE_RE.test(value)) return true
+  return SDH_AMBIENT_SUBJECT_RE.test(value) && SDH_AMBIENT_ACTION_RE.test(value)
+}
+
+function cleanSdhCueText(value) {
+  const source = String(value == null ? '' : value)
+  let removed = 0
+  let text = source.replace(/\[([^\]\n]{1,160})\]/g, (whole, label) => {
+    if (!isSdhDescription(label)) return whole
+    removed++
+    return ''
+  })
+
+  text = text
+    .replace(/<(i|b|u)>\s*<\/\1>/gi, '')
+    .split('\n')
+    .map(line => line.replace(/[ \t]{2,}/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim()
+
+  const visible = text
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .trim()
+
+  return {
+    text: visible ? text : '',
+    removed
+  }
+}
+
+function prepareCuesForTranslation(cues) {
+  const prepared = []
+  let sdhRemoved = 0
+
+  for (const cue of Array.isArray(cues) ? cues : []) {
+    const cleaned = cleanSdhCueText(cue?.text)
+    sdhRemoved += cleaned.removed
+    if (!cleaned.text) continue
+    prepared.push({
+      ...cue,
+      text: cleaned.text
+    })
+  }
+
+  return { cues: prepared, sdhRemoved }
+}
+
 function chunkCues(cues, maxItems = config.translationChunkItems, maxChars = config.translationChunkChars) {
   const chunks = []
   let current = []
@@ -148,7 +210,7 @@ function metricMs(value) {
   return Math.max(0, Math.round(Number.isFinite(number) ? number : 0))
 }
 
-function pushMetric(metrics, key, value, maxItems = 16) {
+function pushMetric(metrics, key, value, maxItems = Infinity) {
   if (!metrics) return
   if (!Array.isArray(metrics[key])) metrics[key] = []
   if (metrics[key].length < maxItems) metrics[key].push(value)
@@ -420,6 +482,15 @@ function aggregateTranslationStats(statsList, expected) {
   }
 }
 
+
+function sumNumericMetrics(values) {
+  if (!Array.isArray(values)) return 0
+  return values.reduce((sum, value) => {
+    const number = Number(value)
+    return Number.isFinite(number) && number >= 0 ? sum + number : sum
+  }, 0)
+}
+
 async function translateCues(cues, options = {}) {
   const plan = createTranslationPlan(cues, options)
   const chunks = chunkCues(cues, plan.maxItems, plan.maxChars)
@@ -475,6 +546,9 @@ async function translateCues(cues, options = {}) {
       geminiInputTokens: Array.isArray(requestMetrics.geminiInputTokens) ? requestMetrics.geminiInputTokens : [],
       geminiOutputTokens: Array.isArray(requestMetrics.geminiOutputTokens) ? requestMetrics.geminiOutputTokens : [],
       geminiTotalTokens: Array.isArray(requestMetrics.geminiTotalTokens) ? requestMetrics.geminiTotalTokens : [],
+      geminiInputTokensTotal: sumNumericMetrics(requestMetrics.geminiInputTokens),
+      geminiOutputTokensTotal: sumNumericMetrics(requestMetrics.geminiOutputTokens),
+      geminiTotalTokensTotal: sumNumericMetrics(requestMetrics.geminiTotalTokens),
       hedgeStarts: Number(requestMetrics.hedgeStarts || 0),
       hedgeReplicaWins: Number(requestMetrics.hedgeReplicaWins || 0),
       hedgeCancels: Number(requestMetrics.hedgeCancels || 0)
@@ -726,13 +800,15 @@ async function translateSubtitleUrl(url, options = {}) {
 
   const parseStartedAt = metricNow(options)
   const cues = parseTimedCues(source)
+  const prepared = prepareCuesForTranslation(cues)
+  const translationCues = prepared.cues
   const parseMs = metricMs(metricNow(options) - parseStartedAt)
   const sourceBytes = Buffer.byteLength(source, 'utf8')
   const originalOnStats = options.onTranslationStats
   let translationStats = null
 
   try {
-    const translated = await translateCues(cues, {
+    const translated = await translateCues(translationCues, {
       ...options,
       onTranslationStats: stats => {
         translationStats = stats
@@ -745,6 +821,7 @@ async function translateSubtitleUrl(url, options = {}) {
       parseMs,
       sourceBytes,
       cueCount: cues.length,
+      sdhRemoved: prepared.sdhRemoved,
       pipelineMs: metricMs(metricNow(options) - pipelineStartedAt)
     }
 
@@ -761,6 +838,7 @@ async function translateSubtitleUrl(url, options = {}) {
         parseMs,
         sourceBytes,
         cueCount: cues.length,
+        sdhRemoved: prepared.sdhRemoved,
         pipelineMs: metricMs(metricNow(options) - pipelineStartedAt)
       }
     } catch {}
@@ -770,6 +848,9 @@ async function translateSubtitleUrl(url, options = {}) {
 module.exports = {
   normaliseTimestampLine,
   parseTimedCues,
+  isSdhDescription,
+  cleanSdhCueText,
+  prepareCuesForTranslation,
   chunkCues,
   extractGeminiText,
   isTransientStatus,

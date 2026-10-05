@@ -1423,7 +1423,11 @@ async function processQueueMessage(body, env, options = {}) {
       geminiFinishReasons: repair.geminiFinishReasons,
       geminiInputTokens: repair.geminiInputTokens,
       geminiOutputTokens: repair.geminiOutputTokens,
-      geminiTotalTokens: repair.geminiTotalTokens
+      geminiTotalTokens: repair.geminiTotalTokens,
+      geminiInputTokensTotal: repair.geminiInputTokensTotal,
+      geminiOutputTokensTotal: repair.geminiOutputTokensTotal,
+      geminiTotalTokensTotal: repair.geminiTotalTokensTotal,
+      sdhRemoved: repair.sdhRemoved
     }).catch(() => {})
 
     logPerf({
@@ -1475,7 +1479,11 @@ async function processQueueMessage(body, env, options = {}) {
       geminiFinishReasons: perf.geminiFinishReasons,
       geminiInputTokens: perf.geminiInputTokens,
       geminiOutputTokens: perf.geminiOutputTokens,
-      geminiTotalTokens: perf.geminiTotalTokens
+      geminiTotalTokens: perf.geminiTotalTokens,
+      geminiInputTokensTotal: perf.geminiInputTokensTotal,
+      geminiOutputTokensTotal: perf.geminiOutputTokensTotal,
+      geminiTotalTokensTotal: perf.geminiTotalTokensTotal,
+      sdhRemoved: perf.sdhRemoved
     }).catch(() => {})
     throw error
   }
