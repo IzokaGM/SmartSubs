@@ -1421,7 +1421,9 @@ async function processQueueMessage(body, env, options = {}) {
       geminiStatuses: repair.geminiStatuses,
       geminiPromptChars: repair.geminiPromptChars,
       geminiFinishReasons: repair.geminiFinishReasons,
-      geminiOutputTokens: repair.geminiOutputTokens
+      geminiInputTokens: repair.geminiInputTokens,
+      geminiOutputTokens: repair.geminiOutputTokens,
+      geminiTotalTokens: repair.geminiTotalTokens
     }).catch(() => {})
 
     logPerf({
@@ -1471,7 +1473,9 @@ async function processQueueMessage(body, env, options = {}) {
       geminiStatuses: perf.geminiStatuses,
       geminiPromptChars: perf.geminiPromptChars,
       geminiFinishReasons: perf.geminiFinishReasons,
-      geminiOutputTokens: perf.geminiOutputTokens
+      geminiInputTokens: perf.geminiInputTokens,
+      geminiOutputTokens: perf.geminiOutputTokens,
+      geminiTotalTokens: perf.geminiTotalTokens
     }).catch(() => {})
     throw error
   }

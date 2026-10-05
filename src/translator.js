@@ -195,10 +195,18 @@ async function requestGemini(prompt, options = {}) {
       pushMetric(metrics, 'geminiFinishReasons',
         typeof finishReason === 'string' && finishReason
           ? finishReason.slice(0, 32) : 'NA')
+      const inputTokens = body?.usageMetadata?.promptTokenCount
       const outputTokens = body?.usageMetadata?.candidatesTokenCount
+      const totalTokens = body?.usageMetadata?.totalTokenCount
+      pushMetric(metrics, 'geminiInputTokens',
+        typeof inputTokens === 'number' && Number.isFinite(inputTokens) && inputTokens >= 0
+          ? Math.round(inputTokens) : 'NA')
       pushMetric(metrics, 'geminiOutputTokens',
         typeof outputTokens === 'number' && Number.isFinite(outputTokens) && outputTokens >= 0
           ? Math.round(outputTokens) : 'NA')
+      pushMetric(metrics, 'geminiTotalTokens',
+        typeof totalTokens === 'number' && Number.isFinite(totalTokens) && totalTokens >= 0
+          ? Math.round(totalTokens) : 'NA')
     }
 
     try {
@@ -435,7 +443,9 @@ async function translateCues(cues, options = {}) {
     geminiStatuses: [],
     geminiPromptChars: [],
     geminiFinishReasons: [],
-    geminiOutputTokens: []
+    geminiInputTokens: [],
+    geminiOutputTokens: [],
+    geminiTotalTokens: []
   }
   const mediaType = String(options.mediaType || '').toLowerCase()
   const movieHedgeEnabled = mediaType === 'movie' && options.movieHedgeEnabled !== false
@@ -462,7 +472,9 @@ async function translateCues(cues, options = {}) {
       geminiStatuses: Array.isArray(requestMetrics.geminiStatuses) ? requestMetrics.geminiStatuses : [],
       geminiPromptChars: Array.isArray(requestMetrics.geminiPromptChars) ? requestMetrics.geminiPromptChars : [],
       geminiFinishReasons: Array.isArray(requestMetrics.geminiFinishReasons) ? requestMetrics.geminiFinishReasons : [],
+      geminiInputTokens: Array.isArray(requestMetrics.geminiInputTokens) ? requestMetrics.geminiInputTokens : [],
       geminiOutputTokens: Array.isArray(requestMetrics.geminiOutputTokens) ? requestMetrics.geminiOutputTokens : [],
+      geminiTotalTokens: Array.isArray(requestMetrics.geminiTotalTokens) ? requestMetrics.geminiTotalTokens : [],
       hedgeStarts: Number(requestMetrics.hedgeStarts || 0),
       hedgeReplicaWins: Number(requestMetrics.hedgeReplicaWins || 0),
       hedgeCancels: Number(requestMetrics.hedgeCancels || 0)

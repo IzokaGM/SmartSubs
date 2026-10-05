@@ -9,9 +9,9 @@ const {
 const { sanitiseEvent } = require('../src/diagnostics')
 
 const source = [{ id: 17, text: 'Where is your brother?' }, { id: 18, text: 'He went home.' }]
-const responseBody = (translations, finishReason = 'STOP', tokenCount = 54) => ({
+const responseBody = (translations, finishReason = 'STOP', tokenCount = 54, inputTokens = 30) => ({
   candidates: [{ finishReason, content: { parts: [{ text: JSON.stringify({ translations }) }] } }],
-  usageMetadata: { candidatesTokenCount: tokenCount }
+  usageMetadata: { promptTokenCount: inputTokens, candidatesTokenCount: tokenCount, totalTokenCount: inputTokens + tokenCount }
 })
 
 test('structured prompt keeps Bahasa Melayu Malaysia, cue integrity and JSON output', () => {
@@ -48,7 +48,9 @@ test('records finish reason and candidate output tokens on successful response w
   assert.equal(generationConfig.maxOutputTokens, undefined)
   assert.deepEqual(metrics.geminiStatuses, [200])
   assert.deepEqual(metrics.geminiFinishReasons, ['STOP'])
+  assert.deepEqual(metrics.geminiInputTokens, [30])
   assert.deepEqual(metrics.geminiOutputTokens, [54])
+  assert.deepEqual(metrics.geminiTotalTokens, [84])
 })
 
 test('missing metadata, 503 and retry preserve one aligned entry per API attempt', async () => {
@@ -68,7 +70,9 @@ test('missing metadata, 503 and retry preserve one aligned entry per API attempt
   })
   assert.deepEqual(metrics.geminiStatuses, [503, 200])
   assert.deepEqual(metrics.geminiFinishReasons, ['NA', 'NA'])
+  assert.deepEqual(metrics.geminiInputTokens, ['NA', 'NA'])
   assert.deepEqual(metrics.geminiOutputTokens, ['NA', 'NA'])
+  assert.deepEqual(metrics.geminiTotalTokens, ['NA', 'NA'])
   assert.equal(metrics.geminiCallMs.length, 2)
   assert.equal(metrics.geminiPromptChars.length, 2)
 })
@@ -107,14 +111,20 @@ test('performance snapshot and existing single diagnostic event safely include c
     onTranslationStats: stats => { result = stats }
   })
   assert.deepEqual(result.geminiFinishReasons, ['STOP'])
+  assert.deepEqual(result.geminiInputTokens, [30])
   assert.deepEqual(result.geminiOutputTokens, [9])
+  assert.deepEqual(result.geminiTotalTokens, [39])
   const diagnostic = sanitiseEvent({
     event: 'queue-translation-complete',
     geminiFinishReasons: result.geminiFinishReasons,
-    geminiOutputTokens: result.geminiOutputTokens
+    geminiInputTokens: result.geminiInputTokens,
+    geminiOutputTokens: result.geminiOutputTokens,
+    geminiTotalTokens: result.geminiTotalTokens
   })
   assert.deepEqual(diagnostic.geminiFinishReasons, ['STOP'])
+  assert.deepEqual(diagnostic.geminiInputTokens, ['30'])
   assert.deepEqual(diagnostic.geminiOutputTokens, ['9'])
+  assert.deepEqual(diagnostic.geminiTotalTokens, ['39'])
   assert.equal(diagnostic.event, 'queue-translation-complete')
   assert.equal(Object.hasOwn(diagnostic, 'translations'), false)
 })

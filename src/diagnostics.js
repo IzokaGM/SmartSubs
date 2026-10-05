@@ -30,7 +30,7 @@ function sanitiseEvent(event = {}) {
     'queueDelayMs', 'sourceFetchMs', 'parseMs', 'sourceBytes', 'cueCount', 'pipelineMs',
     'translationWallMs', 'chunkTimeline', 'maxChunkMs', 'avgChunkMs', 'sumChunkMs',
     'geminiCallMs', 'geminiStatuses', 'geminiPromptChars',
-    'geminiFinishReasons', 'geminiOutputTokens', 'failureStage',
+    'geminiFinishReasons', 'geminiInputTokens', 'geminiOutputTokens', 'geminiTotalTokens', 'failureStage',
     'retryDelaySeconds', 'nextAttempt', 'abortRetries',
     'hedgeStarts', 'hedgeReplicaWins', 'hedgeCancels',
     'mediaType', 'movieAdaptiveChunking', 'movieTargetChunks',
