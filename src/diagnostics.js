@@ -14,7 +14,7 @@ function sanitiseEvent(event = {}) {
     event: safeText(event.event, 48)
   }
   const allowed = [
-    'type', 'id', 'result', 'error', 'cache', 'status',
+    'type', 'id', 'result', 'error', 'cache', 'status', 'sourceId',
     'upstreamCount', 'malayCount', 'subtitleCount',
     'malayCandidateCount', 'malaySelectedId', 'malaySelectedScore', 'malayTop',
     'nativeConfidence', 'nativeConfidenceReason', 'nativeScoreUplift', 'nativeDecision',
@@ -116,6 +116,11 @@ function deriveVerdict(events = []) {
     if (lastSubtitle.byokConfigured === false) return 'BYOK_NOT_CONFIGURED'
     return 'SUBTITLE_REQUEST_RETURNED_ZERO'
   }
+  // A newer failure must not be masked by an older successful delivery.
+  // SmartSubs has one primary AI source, so this timestamp check preserves
+  // automatic Queue prefetch while reflecting the latest player outcome.
+  if (lastTranslationFailed && Number(lastTranslationFailed.ts) >= Number(lastSubtitle.ts) &&
+      (!lastTranslationDelivered || Number(lastTranslationFailed.ts) > Number(lastTranslationDelivered.ts))) return 'TRANSLATION_FAILED'
   if (lastTranslationDelivered && Number(lastTranslationDelivered.ts) >= Number(lastSubtitle.ts)) return 'TRANSLATION_DELIVERED'
   if (lastTranslationFailed && Number(lastTranslationFailed.ts) >= Number(lastSubtitle.ts)) return 'TRANSLATION_FAILED'
   if (lastTranslationPending && Number(lastTranslationPending.ts) >= Number(lastSubtitle.ts)) return 'TRANSLATION_PREPARING_IN_QUEUE'

@@ -17,12 +17,70 @@ const { decodeTranslationTokenData } = tokenModule
 const { createUserConfigToken, decodeUserConfigToken, tokenFingerprint } = userConfigModule
 const { buildConfiguredUrls, validateGeminiApiKey, renderConfigurePage, escapeHtml } = configureModule
 const { nowMs, roundMs, logPerf } = perfModule
-const { recordDiagnostic, readDiagnostics, deriveVerdict } = diagnosticsModule
+const { recordDiagnostic, readDiagnostics, deriveVerdict, sanitiseEvent } = diagnosticsModule
 
 const BUILD_ID = 'final-stable-m20r3'
 const caches = new WeakMap()
 // Per-request memoization only. No cross-request stale state when the owner switches OFF.
 const diagnosticStateByEnv = new WeakMap()
+
+const DIAG_EXPORT_SCRIPT = `(() => {
+  const dataEl = document.getElementById('diagnose-export-data')
+  if (!dataEl) return
+  let payload
+  try { payload = JSON.parse(dataEl.value || dataEl.textContent || '{}') } catch { return }
+  const safePart = value => String(value || 'diagnose')
+    .replace(/[^a-z0-9._-]+/gi, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'diagnose'
+  const stamp = () => new Date().toISOString().replace(/[:.]/g, '-')
+  const download = (content, type, extension) => {
+    const blob = new Blob([content], { type })
+    const href = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = href
+    link.download = 'SmartSubs-' + safePart((payload.overview && payload.overview.latestMedia) || 'diagnose') + '-' + stamp() + '.' + extension
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(href), 1000)
+  }
+  const summaryText = item => {
+    const time = item.ts ? new Date(Number(item.ts)).toISOString() : ''
+    const heading = [item.category, item.title].filter(Boolean).join(' · ')
+    const metrics = Array.isArray(item.metrics)
+      ? item.metrics.map(metric => metric.label + '=' + metric.value).join(' · ')
+      : ''
+    return [time + (heading ? ' ' + heading : ''), item.summary || '', metrics]
+      .filter(Boolean)
+      .join('\\n  ')
+  }
+  document.getElementById('save-log-json')?.addEventListener('click', () => {
+    const output = { ...payload, exportedAt: new Date().toISOString() }
+    download(JSON.stringify(output, null, 2), 'application/json;charset=utf-8', 'json')
+  })
+  document.getElementById('save-log-txt')?.addEventListener('click', () => {
+    const overview = payload.overview || {}
+    const events = Array.isArray(payload.events) ? payload.events : []
+    const summaries = Array.isArray(payload.summaries) ? payload.summaries : []
+    const lines = [
+      'SmartSubs Diagnose Log',
+      'Exported: ' + new Date().toISOString(),
+      'Build: ' + (payload.build || ''),
+      'Verdict: ' + (payload.verdict || ''),
+      'Latest media: ' + (overview.latestMedia || '—'),
+      'Available: ' + (overview.tracksReturned == null ? '—' : overview.tracksReturned + ' tracks') + (overview.availableSummary ? ' · ' + overview.availableSummary : ''),
+      'English source: ' + (overview.englishSource || '—'),
+      'Translation: ' + (overview.translationStatus || '—') + (overview.translationSummary ? ' · ' + overview.translationSummary : ''),
+      'Delivery: ' + (overview.deliveryStatus || '—') + (overview.deliverySummary ? ' · ' + overview.deliverySummary : ''),
+      '',
+      'Technical events (' + events.length + ')',
+      ...summaries.map(summaryText)
+    ]
+    download(lines.join('\\n\\n'), 'text/plain;charset=utf-8', 'txt')
+  })
+})()`
+const DIAG_EXPORT_SCRIPT_HASH = createHash('sha256').update(DIAG_EXPORT_SCRIPT, 'utf8').digest('base64')
 
 async function diagnosticState(env, configId) {
   if (!env || !diagnosticAdminReady(env) || !/^[a-f0-9]{16}$/.test(String(configId || ''))) return { enabled: false, since: 0 }
@@ -63,14 +121,8 @@ function validDiagnosticAdminKey(submitted, stored) {
 }
 
 function diagnosticControlHtml(state = { enabled: false }, ready = false, error = '') {
-  const enabled = state.enabled === true
-  const heading = enabled ? 'ON' : 'OFF'
-  // When ON, keep the control compact and allow a one-tap OFF without re-entering the key.
-  // Turning ON still requires the configured server-side admin key.
-  if (enabled) {
-    return `<section class="card"><div class="diag-control-row"><h2>Diagnostics: <span class="pill good">${heading}</span></h2><form method="POST" action="diagnose/toggle" autocomplete="off"><button class="diag-off-btn" type="submit" name="action" value="off">Turn OFF</button></form></div><p class="muted">Diagnostic events are being recorded to Workers KV.</p>${error ? `<p class="bad-text">${escapeHtml(error)}</p>` : ''}</section>`
-  }
-  return `<section class="card"><h2>Diagnostics: <span class="pill neutral">${heading}</span></h2><p class="muted">Diagnostic recording is OFF. Translation, Queue and cache still work normally.</p><form method="POST" action="diagnose/toggle" autocomplete="off"><label for="diag-admin">Admin key</label><input id="diag-admin" name="adminKey" type="password" minlength="6" maxlength="256" required autocomplete="off" placeholder="Admin key (not Gemini API key)" ${ready ? '' : 'disabled'}><div><button type="submit" name="action" value="on" ${ready ? '' : 'disabled'}>Turn ON</button></div></form>${!ready ? '<p class="muted">Set secret SMARTSUBS_DIAG_ADMIN_KEY (6+ characters) and ensure SMARTSUBS_DELIVERY is available.</p>' : ''}${error ? `<p class="bad-text">${escapeHtml(error)}</p>` : ''}</section>`
+  if (state.enabled === true) return ''
+  return `<section class="card diag-setup"><form method="POST" action="diagnose/toggle" autocomplete="off"><label for="diag-admin">Admin key to turn Diagnostics ON</label><div class="diag-on-row"><input id="diag-admin" name="adminKey" type="password" minlength="6" maxlength="256" required autocomplete="off" placeholder="Admin key (not Gemini API key)" ${ready ? '' : 'disabled'}><button type="submit" name="action" value="on" ${ready ? '' : 'disabled'}>Turn ON</button></div></form>${!ready ? '<p class="muted">Set secret SMARTSUBS_DIAG_ADMIN_KEY (6+ characters) and ensure SMARTSUBS_DELIVERY is available.</p>' : ''}${error ? `<p class="bad-text">${escapeHtml(error)}</p>` : ''}</section>`
 }
 
 function responseHeaders(contentType, status = 200, options = {}) {
@@ -85,9 +137,10 @@ function responseHeaders(contentType, status = 200, options = {}) {
     'cache-control': options.cacheControl || (options.noStore ? 'no-store' : status === 200 ? 'public, max-age=300' : 'no-store')
   })
   if (options.csp) {
+    const scriptPolicy = options.scriptHash ? `; script-src 'sha256-${options.scriptHash}'` : ''
     headers.set(
       'content-security-policy',
-      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+      `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'${scriptPolicy}`
     )
   }
   for (const [key, value] of Object.entries(options.headers || {})) {
@@ -378,6 +431,145 @@ function formatDuration(value) {
   return `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`
 }
 
+function compactMetric(label, value) {
+  if (value === undefined || value === null || value === '') return null
+  return { label: String(label), value: String(value) }
+}
+
+function eventPresentation(item = {}) {
+  const event = String(item.event || '')
+  const sourceId = String(item.sourceId || '')
+  const metrics = []
+  let category = 'EVENT'
+  let tone = 'neutral'
+  let title = event || 'Technical event'
+  let summary = ''
+
+  const add = (label, value) => {
+    const metric = compactMetric(label, value)
+    if (metric) metrics.push(metric)
+  }
+
+  if (event === 'subtitle-request') {
+    category = 'DISCOVERY'
+    title = 'Subtitle request'
+    summary = item.id ? compactMediaLabel(item) : 'Player requested subtitle tracks'
+  } else if (event === 'subtitle-result') {
+    category = 'DISCOVERY'
+    tone = item.result === 'error' ? 'bad' : 'good'
+    title = 'Subtitle discovery'
+    const total = Number(item.subtitleCount || 0)
+    const ai = item.autoReady === true ? 1 : 0
+    const english = Number(item.englishTrackCount ?? item.englishCandidateCount ?? 0)
+    const nativeMalay = Number(item.malayCount || 0)
+    const parts = [`${total} tracks`, `${ai} AI Malay`, `${english} English`]
+    if (nativeMalay > 0) parts.push(`${nativeMalay} Native Malay`)
+    summary = parts.join(' · ')
+    add('Prefetch', item.autoPrefetch === false ? 'OFF' : item.autoPrefetch === true ? 'ON' : undefined)
+    add('Selected English', item.englishSelectedId || 'None')
+    add('Upstream', item.upstreamCount)
+  } else if (event === 'translation-request') {
+    category = 'TRANSLATE'
+    title = 'AI translation requested'
+    summary = sourceId ? `OpenSubtitles source ${sourceId}` : 'Malay AI requested by player or prefetch'
+    add('Mode', item.status)
+  } else if (event === 'player-translation-queued' || event === 'queue-enqueued') {
+    category = 'QUEUE'
+    title = 'AI translation queued'
+    summary = sourceId ? `OpenSubtitles source ${sourceId}` : 'Translation job sent to Queue'
+    add('Profile', item.profile)
+    add('Status', item.status)
+  } else if (event === 'queue-deduped') {
+    category = 'QUEUE'
+    title = 'Existing Queue job reused'
+    summary = sourceId ? `OpenSubtitles source ${sourceId}` : 'Duplicate translation job avoided'
+    add('Status', item.status)
+  } else if (event === 'queue-translation-start') {
+    category = 'TRANSLATE'
+    title = 'AI translation started'
+    summary = sourceId ? `OpenSubtitles source ${sourceId}` : 'Queue consumer started translation'
+    add('Profile', item.profile)
+    add('Concurrency', item.concurrency)
+    add('Queue delay', item.queueDelayMs === undefined ? undefined : formatDuration(item.queueDelayMs))
+  } else if (event === 'queue-translation-complete' || event === 'prefetch-complete') {
+    category = 'TRANSLATE'
+    tone = 'good'
+    title = 'AI translation ready'
+    const parts = []
+    if (sourceId) parts.push(`Source ${sourceId}`)
+    if (item.cache) parts.push(`Cache ${item.cache}`)
+    if (item.totalMs !== undefined) parts.push(formatDuration(item.totalMs))
+    summary = parts.join(' · ') || 'Translation completed'
+    add('Gemini calls', item.geminiCalls)
+    add('Tokens', item.geminiTotalTokensTotal)
+    add('Chunks', item.chunks)
+    if (Number(item.missing || 0) > 0 || Number(item.retryRecovered || 0) > 0) {
+      add('Cue recovery', `${Number(item.missing || 0)} missing · ${Number(item.retryRecovered || 0)} recovered`)
+    }
+  } else if (event === 'translation-delivered' || event === 'queue-join-hit') {
+    category = 'DELIVERY'
+    tone = 'good'
+    title = event === 'translation-delivered' ? 'Translation delivered' : 'Queued translation joined'
+    const parts = []
+    if (sourceId) parts.push(`Source ${sourceId}`)
+    if (item.cache) parts.push(`Cache ${item.cache}`)
+    if (item.totalMs !== undefined) parts.push(formatDuration(item.totalMs))
+    if (item.waitMs !== undefined && Number(item.waitMs) > 0) parts.push(`wait ${formatDuration(item.waitMs)}`)
+    summary = parts.join(' · ') || 'Malay subtitle returned to player'
+    add('Join', item.joinStatus)
+    add('Polls', item.polls)
+  } else if (event === 'translation-pending' || event === 'queue-join-start') {
+    category = 'QUEUE'
+    tone = 'warn'
+    title = event === 'translation-pending' ? 'Translation still preparing' : 'Waiting for Queue result'
+    summary = sourceId ? `OpenSubtitles source ${sourceId}` : 'Player is waiting for the selected translation'
+    add('Status', item.status)
+    add('Wait', item.waitMs === undefined ? undefined : formatDuration(item.waitMs))
+    add('Polls', item.polls)
+  } else if (event.includes('failed') || item.error) {
+    category = 'ERROR'
+    tone = 'bad'
+    title = event === 'translation-failed' ? 'Translation failed'
+      : event === 'queue-translation-failed' ? 'Queue translation failed'
+        : event === 'queue-enqueue-failed' ? 'Queue enqueue failed'
+          : 'Technical failure'
+    summary = item.error || item.reason || item.failureStage || item.status || 'Failure recorded'
+    add('Source', sourceId || undefined)
+    add('Stage', item.failureStage)
+    add('Time', item.totalMs === undefined ? undefined : formatDuration(item.totalMs))
+  } else if (event.startsWith('queue-')) {
+    category = 'QUEUE'
+    title = event.replaceAll('-', ' ')
+    summary = sourceId ? `OpenSubtitles source ${sourceId}` : (item.status || 'Queue activity')
+    add('Wait', item.waitMs === undefined ? undefined : formatDuration(item.waitMs))
+  } else if (event.startsWith('prefetch-')) {
+    category = 'PREFETCH'
+    title = event.replaceAll('-', ' ')
+    summary = sourceId ? `OpenSubtitles source ${sourceId}` : (item.status || 'Auto-prefetch activity')
+  } else {
+    title = event ? event.replaceAll('-', ' ') : 'Technical event'
+    summary = sourceId ? `OpenSubtitles source ${sourceId}` : (item.status || item.result || '')
+  }
+
+  return { category, tone, title, summary, metrics: metrics.slice(0, 6) }
+}
+
+function renderTechnicalEvent(item = {}) {
+  const view = eventPresentation(item)
+  const metrics = view.metrics
+    .map(metric => `<span><b>${escapeHtml(metric.label)}</b> ${escapeHtml(metric.value)}</span>`)
+    .join('')
+  return `<article class="event-card"><div class="event-top"><span class="event-badge ${escapeHtml(view.tone)}">${escapeHtml(view.category)}</span><time>${escapeHtml(formatMalaysiaTime(item.ts))}</time></div><div class="event-title">${escapeHtml(view.title)}</div>${view.summary ? `<div class="event-summary">${escapeHtml(view.summary)}</div>` : ''}${metrics ? `<div class="event-metrics">${metrics}</div>` : ''}</article>`
+}
+
+function renderRawTechnicalEvent(item = {}) {
+  const detail = Object.entries(item)
+    .filter(([key]) => !['ts', 'event'].includes(key))
+    .map(([key, value]) => `<span><b>${escapeHtml(key)}</b>=${escapeHtml(Array.isArray(value) ? value.join(',') : value)}</span>`)
+    .join('') || '<span>No details</span>'
+  return `<article class="raw-event-card"><div class="raw-event-top"><code>${escapeHtml(item.event || 'event')}</code><time>${escapeHtml(formatMalaysiaTime(item.ts))}</time></div><div class="event-detail">${detail}</div></article>`
+}
+
 function verdictPresentation(verdict) {
   const map = {
     NO_SUBTITLE_REQUEST_SEEN: ['Waiting for subtitle request', 'neutral', 'The player has not requested this configured SmartSubs addon yet.'],
@@ -410,82 +602,156 @@ function renderConfiguredDiagnosePage(configId, events, control = { enabled: tru
   const controls = diagnosticControlHtml(control, control.ready, control.error)
   if (control.enabled === false) {
     return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>SmartSubs Diagnose</title><style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101116;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif}.wrap{max-width:920px;margin:auto;padding:18px 12px 40px}.card{background:#181a21;border:1px solid #30333d;border-radius:16px;padding:16px;margin-bottom:12px}h1{font-size:24px;margin:0 0 8px}.diagnose-heading{text-align:center;margin-bottom:20px}.diagnose-heading h1{margin:0 0 6px}.diagnose-heading .muted{font-variant-numeric:tabular-nums}h2{font-size:17px;margin:0 0 12px}.muted{color:#aeb1bb;font-size:13px}.status{display:flex;gap:10px;align-items:flex-start}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:5px 10px;font-weight:800;font-size:12px;letter-spacing:.02em}.good{background:#123b29;color:#a7f3d0}.warn{background:#493812;color:#fde68a}.bad{background:#4a1d24;color:#fecaca}.neutral{background:#30333d;color:#e5e7eb}.status-copy{flex:1}.status-title{font-size:20px;font-weight:800;margin-bottom:4px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{background:#111319;border:1px solid #2b2e37;border-radius:12px;padding:12px}.metric .label{color:#aeb1bb;font-size:12px}.metric .value{font-size:18px;font-weight:800;margin-top:3px;word-break:break-word}.metric .sub{color:#aeb1bb;font-size:12px;margin-top:4px;word-break:break-word}.candidate{display:grid;grid-template-columns:34px 1fr auto auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid #30333d;font-size:13px}.candidate:last-child{border-bottom:0}.candidate.selected{background:#16271e}.candidate em{font-style:normal;font-size:10px;font-weight:800;color:#a7f3d0}.meta-row{display:grid;grid-template-columns:90px 42px 1fr;gap:8px;padding:8px 0;border-bottom:1px solid #30333d;align-items:start}.meta-row:last-child{border-bottom:0}.meta-row .yes{color:#a7f3d0}.meta-row .no{color:#fca5a5}.meta-row small{color:#c7c9d1;word-break:break-word}.guide{font-size:15px;line-height:1.5}.event-card{border-top:1px solid #30333d;padding:12px 0}.event-card:first-child{border-top:0}.event-head{display:flex;gap:10px;justify-content:space-between;align-items:center;margin-bottom:7px}.event-head time{font-size:12px;color:#aeb1bb}.event-head code{font-size:12px;color:#c9ffdc}.event-detail{display:flex;flex-wrap:wrap;gap:6px}.event-detail span{background:#111319;border-radius:7px;padding:4px 6px;font-size:11px;word-break:break-word}.event-detail b{color:#aeb1bb;font-weight:600}details summary{cursor:pointer;font-weight:800;padding:4px 0}code{color:#c9ffdc}@media(max-width:640px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.media-metric{grid-column:1/-1}.candidate{grid-template-columns:28px 1fr auto}.candidate em{grid-column:2}.meta-row{grid-template-columns:82px 38px 1fr}.event-head{align-items:flex-start;flex-direction:column;gap:4px}}
-input{display:block;width:100%;max-width:430px;min-height:44px;margin:10px 0;padding:10px;background:#101116;color:#fff;border:1px solid #59606b;border-radius:8px}button{min-height:44px;padding:10px 18px;border:0;border-radius:9px;background:#3879d7;color:#fff;font-weight:bold}button:disabled{opacity:.5}.bad-text{color:#fecaca}.diag-control-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.diag-control-row h2{margin:0}.diag-off-btn{background:#30333d;border:1px solid #59606b;font-size:12px;min-height:36px;padding:6px 12px;white-space:nowrap}
-</style></head><body><main class="wrap"><section class="card"><header class="diagnose-heading"><h1>SmartSubs Diagnose</h1><div class="muted">${escapeHtml(formatMalaysiaTime(Date.now()))}</div></header><div class="status"><span class="pill neutral">OFF</span><div class="status-copy"><div class="status-title">Diagnostics recording is off</div><div class="muted">Translation, Queue and cache still work normally.</div></div></div></section>${controls}<p class="muted">Old events remain in KV until their existing 24-hour expiry. No diagnostic history is read while OFF.</p></main></body></html>`
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101116;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif}.wrap{max-width:920px;margin:auto;padding:18px 12px 40px}.card{background:#181a21;border:1px solid #30333d;border-radius:16px;padding:16px;margin-bottom:12px}.hero-card{padding:20px 16px 16px}h1{font-size:24px;margin:0}.diagnose-heading{text-align:center}.diagnose-heading h1{margin:0 0 6px}.diagnose-heading .muted{font-variant-numeric:tabular-nums}.muted{color:#aeb1bb;font-size:13px}.hero-state{text-align:center;margin:18px auto 14px;max-width:620px}.hero-state-title{font-size:20px;font-weight:800;margin-bottom:4px}.hero-diagnostics{display:flex;align-items:center;justify-content:center;gap:10px;border-top:1px solid #30333d;padding-top:14px;margin-top:14px;font-size:18px}.diag-status-toggle{cursor:pointer;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;min-width:62px;min-height:40px;padding:7px 14px;font-weight:900;font-size:15px;text-decoration:none;border:0}.diag-status-toggle.neutral{background:#30333d;color:#e5e7eb}.diag-setup label{display:block;font-weight:700;margin-bottom:8px}.diag-on-row{display:flex;gap:8px;align-items:center}.diag-on-row input{flex:1;min-width:0;min-height:44px;padding:10px;background:#101116;color:#fff;border:1px solid #59606b;border-radius:8px}.diag-on-row button{min-height:44px;padding:10px 18px;border:0;border-radius:9px;background:#3879d7;color:#fff;font-weight:bold}.diag-on-row button:disabled,.diag-on-row input:disabled{opacity:.5}.bad-text{color:#fecaca}@media(max-width:640px){.diag-on-row{align-items:stretch;flex-direction:column}.diag-on-row button{width:100%}}
+</style></head><body><main class="wrap"><section class="card hero-card"><header class="diagnose-heading"><h1>SmartSubs Diagnose</h1><div class="muted">${escapeHtml(formatMalaysiaTime(Date.now()))}</div></header><div class="hero-state"><div class="hero-state-title">Diagnostics recording is off</div><div class="muted">Translation, Queue and cache still work normally.</div></div><div class="hero-diagnostics"><span>Diagnostics:</span><a class="diag-status-toggle neutral" href="#diag-admin">OFF</a></div></section>${controls}<p class="muted">Old events remain in KV until their existing 24-hour expiry. No diagnostic history is read while OFF.</p></main></body></html>`
   }
   const sorted = [...events].sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))
   const verdict = deriveVerdict(sorted)
   const status = verdictPresentation(verdict)
   const lastSubtitle = sorted.find(item => item.event === 'subtitle-result') || null
-  const lastDelivery = sorted.find(item => item.event === 'translation-delivered') || null
-  const lastQueueComplete = sorted.find(item => item.event === 'queue-translation-complete') || null
-  const lastTranslationComplete = lastQueueComplete ||
-    sorted.find(item => item.event === 'prefetch-complete') ||
-    null
-  const lastFailure = sorted.find(item =>
-    ['translation-failed', 'queue-translation-failed', 'prefetch-failed'].includes(item.event)
-  ) || null
-  const selectedId = lastSubtitle?.englishSelectedId || 'Not available'
-  const sourceIds = Array.isArray(lastSubtitle?.englishSourceIds) ? lastSubtitle.englishSourceIds : []
-  const candidateCount = Number(lastSubtitle?.englishCandidateCount || sourceIds.length || 0)
-  // The log does not tag delivery/Queue-complete events with a media ID. Never
-  // reuse an older media's duration for the latest subtitle request.
+  // SmartSubs deliberately offers ONE primary Malay AI source and may run
+  // Queue auto-prefetch before the player selects anything. Do not apply V2's
+  // multi-candidate, on-demand selection boundaries to this addon.
   const latestRequestTs = Number(lastSubtitle?.ts || 0)
-  const deliveryForRequest = lastSubtitle && lastDelivery && Number(lastDelivery.ts || 0) >= latestRequestTs
-    ? lastDelivery : null
-  const coldForRequest = lastSubtitle && lastTranslationComplete && Number(lastTranslationComplete.ts || 0) >= latestRequestTs
-    ? lastTranslationComplete : null
+  const sinceRequest = eventName => lastSubtitle ? sorted.find(item =>
+    item.event === eventName && Number(item.ts || 0) >= latestRequestTs
+  ) || null : null
+  const lastTranslationRequest = sinceRequest('translation-request')
+  const lastQueueStart = sinceRequest('queue-translation-start')
+  const lastQueueEnqueued = sinceRequest('queue-enqueued')
+  const lastPending = sinceRequest('translation-pending') || sinceRequest('player-translation-queued')
+  const deliveryForRequest = sinceRequest('translation-delivered')
+  const coldForRequest = sinceRequest('queue-translation-complete') || sinceRequest('prefetch-complete')
+  const lastFailure = [sinceRequest('translation-failed'), sinceRequest('queue-translation-failed'), sinceRequest('prefetch-failed')]
+    .filter(Boolean).sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))[0] || null
+  const mostRecentSuccess = [deliveryForRequest, coldForRequest]
+    .filter(Boolean).sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))[0] || null
+  const activeFailure = lastFailure && (!mostRecentSuccess || Number(lastFailure.ts || 0) > Number(mostRecentSuccess.ts || 0)) ? lastFailure : null
+  const selectedId = lastSubtitle?.englishSelectedId || 'Not available'
+  const sourceSelected = selectedId !== 'Not available'
+  const sourceIds = Array.isArray(lastSubtitle?.englishSourceIds) ? lastSubtitle.englishSourceIds : []
+  const aiTracks = lastSubtitle && (lastSubtitle.autoReady === true || ['auto-malay-ready', 'native-malay-with-auto-fallback'].includes(lastSubtitle.result)) ? 1 : 0
+  const englishTracks = Number(lastSubtitle?.englishTrackCount ?? Math.min(5, Number(lastSubtitle?.englishCandidateCount || sourceIds.length || 0)))
+  const nativeMalayTracks = Number(lastSubtitle?.malayCount || 0)
+  const totalTracks = Number(lastSubtitle?.subtitleCount || 0)
+  const hasNativeMalay = nativeMalayTracks > 0
+  const availableParts = [`${aiTracks} Malay AI`, `${englishTracks} English`]
+  if (nativeMalayTracks > 0) availableParts.push(`${nativeMalayTracks} Native Malay`)
+  const availableSummary = availableParts.join(' · ')
   const deliveryTime = deliveryForRequest?.totalMs
   const coldTime = coldForRequest?.totalMs
-  const hasNativeMalay = Number(lastSubtitle?.malayCount || 0) > 0
-  const activeFailure = lastFailure && (!lastDelivery || Number(lastFailure.ts || 0) > Number(lastDelivery.ts || 0)) ? lastFailure : null
-
-  // Source order is the unchanged order of eligible, deduplicated OpenSubtitles tracks.
-  // No score or sync-confidence inference is made from missing player metadata.
+  const coldTokens = Number(coldForRequest?.geminiTotalTokensTotal || 0)
+  const prefetchEnabled = lastSubtitle?.autoPrefetch === true
+  const backgroundRunning = Boolean(lastQueueEnqueued || lastQueueStart ||
+    sinceRequest('prefetch-start') || sinceRequest('translation-request')?.status === 'prefetch')
+  const preparing = Boolean(lastPending || lastTranslationRequest || backgroundRunning)
+  let translationValue = 'Waiting'
+  let translationSub = lastSubtitle ? (aiTracks ? (prefetchEnabled ? 'Malay AI offered · auto-prefetch enabled' : 'Malay AI offered · select in player to translate') : 'No Malay AI track offered') : 'No subtitle request'
+  if (activeFailure) {
+    translationValue = 'Failed'
+    translationSub = String(activeFailure.failureStage || activeFailure.status || 'See error below')
+  } else if (coldForRequest) {
+    translationValue = formatDuration(coldTime)
+    translationSub = `Ready${coldTokens > 0 ? ` · ${coldTokens.toLocaleString('en-US')} tokens` : ''}`
+  } else if (deliveryForRequest?.cache === 'HIT') {
+    translationValue = 'Cached'
+    translationSub = 'Ready · No Gemini call'
+  } else if (preparing) {
+    translationValue = 'Preparing'
+    translationSub = prefetchEnabled || backgroundRunning ? 'Auto-prefetch / Queue running' : 'Player translation requested'
+  } else if (prefetchEnabled) {
+    translationValue = 'Queued'
+    translationSub = 'Auto-prefetch enabled'
+  } else if (!aiTracks && hasNativeMalay) {
+    translationValue = 'Not needed'
+    translationSub = 'Existing Native Malay returned'
+  }
+  const deliveryCache = String(deliveryForRequest?.cache || '')
+  const deliveryMode = deliveryCache === 'DELIVERY_RELAY' ? 'Relay'
+    : deliveryCache === 'QUEUE_JOIN' ? 'Queue'
+      : deliveryCache === 'HIT' ? 'Cache hit'
+        : deliveryCache === 'MISS' ? 'Fresh'
+          : deliveryCache ? deliveryCache.replaceAll('_', ' ').toLowerCase().replace(/(^|\s)\S/g, match => match.toUpperCase()) : ''
+  const deliveryValue = deliveryForRequest ? formatDuration(deliveryTime) : '—'
+  const deliverySub = deliveryForRequest ? `Delivered${deliveryMode ? ` · ${deliveryMode}` : ''}` : 'Not started'
+  const heroTitle = status.title
+  const heroExplanation = status.explanation
+  const heroMeta = `Latest subtitle request: ${lastSubtitle ? formatMalaysiaTime(lastSubtitle.ts) : 'Not recorded'}`
+  const heroSourceMeta = sourceSelected ? `Primary English source ${selectedId}` : ''
   const sourceList = sourceIds.length
-    ? sourceIds.map((id, index) => {
-        const selected = String(id) === String(selectedId)
-        return `<div class="candidate${selected ? ' selected' : ''}"><span>#${index + 1}</span><strong>${escapeHtml(id)}</strong>${selected ? '<em>SELECTED</em>' : ''}</div>`
-      }).join('')
+    ? sourceIds.map((id, index) => `<div class="source-row">#${index + 1} · <code>${escapeHtml(id)}</code>${String(id) === String(selectedId) ? ' · PRIMARY SOURCE' : ''}</div>`).join('')
     : '<p class="muted">Source IDs were not recorded for this request.</p>'
+
   const guidance = activeFailure
     ? 'A recent failure was recorded. See the failure details and recent events below.' : ''
 
-  const rawEvents = sorted.map(item => {
-    const detail = Object.entries(item)
-      .filter(([key]) => !['ts', 'event'].includes(key))
-      .map(([key, value]) => `<span><b>${escapeHtml(key)}</b>=${escapeHtml(Array.isArray(value) ? value.join(',') : value)}</span>`)
-      .join('')
-    return `<article class="event-card"><div class="event-head"><time>${escapeHtml(formatMalaysiaTime(item.ts))}</time><code>${escapeHtml(item.event)}</code></div><div class="event-detail">${detail || '<span>No details</span>'}</div></article>`
-  }).join('') || '<p class="muted">No request events recorded in the last 24 hours.</p>'
+  const summaryEvents = sorted.map(renderTechnicalEvent).join('') || '<p class="muted">No request events recorded since the last clear.</p>'
+  const rawEvents = sorted.map(renderRawTechnicalEvent).join('') || '<p class="muted">No raw events recorded since the last clear.</p>'
+  const exportPayload = {
+    format: 'smartsubs-diagnose-log-v1',
+    build: BUILD_ID,
+    verdict,
+    pageGeneratedAt: new Date().toISOString(),
+    overview: {
+      latestMedia: compactMediaLabel(lastSubtitle),
+      malayAi: compactMalayAutoStatus(lastSubtitle),
+      tracksReturned: totalTracks,
+      aiTracks,
+      englishTracks,
+      nativeMalayTracks,
+      availableSummary,
+      englishSource: selectedId === 'Not available' ? '' : selectedId,
+      // Summary reflects SmartSubs auto-prefetch instead of V2 on-demand mode.
+      translationStatus: coldForRequest ? 'Ready' : (deliveryForRequest?.cache === 'HIT' ? 'Cached' : translationValue),
+      translationSummary: translationSub,
+      deliveryStatus: deliveryForRequest ? deliveryCache || 'Delivered' : '—',
+      deliverySummary: deliveryForRequest ? `${formatDuration(deliveryTime)} · Delivered` : 'Not started',
+      deliveryMs: deliveryTime === undefined ? null : Number(deliveryTime),
+      deliveryCache: deliveryForRequest?.cache || '',
+      coldTranslationMs: coldTime === undefined ? null : Number(coldTime),
+      nativeMalay: hasNativeMalay
+    },
+    // Summary download mirrors the Summary tab using already-loaded events.
+    summaries: sorted.map(item => {
+      const view = eventPresentation(item)
+      return {
+        ts: Number(item.ts || 0),
+        category: view.category,
+        title: view.title,
+        summary: view.summary,
+        metrics: view.metrics
+      }
+    }),
+    // Export exactly the already-loaded diagnostic events. Re-sanitise before
+    // embedding so an accidental direct caller can never export secrets/URLs.
+    events: sorted.map(item => sanitiseEvent(item))
+  }
+  const exportData = escapeHtml(JSON.stringify(exportPayload))
 
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SmartSubs Diagnose</title>
 <style>
-:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101116;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif}.wrap{max-width:920px;margin:auto;padding:18px 12px 40px}.card{background:#181a21;border:1px solid #30333d;border-radius:16px;padding:16px;margin-bottom:12px}h1{font-size:24px;margin:0 0 8px}.diagnose-heading{text-align:center;margin-bottom:20px}.diagnose-heading h1{margin:0 0 6px}.diagnose-heading .muted{font-variant-numeric:tabular-nums}h2{font-size:17px;margin:0 0 12px}.muted{color:#aeb1bb;font-size:13px}.status{display:flex;gap:10px;align-items:flex-start}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:5px 10px;font-weight:800;font-size:12px;letter-spacing:.02em}.good{background:#123b29;color:#a7f3d0}.warn{background:#493812;color:#fde68a}.bad{background:#4a1d24;color:#fecaca}.neutral{background:#30333d;color:#e5e7eb}.status-copy{flex:1}.status-title{font-size:20px;font-weight:800;margin-bottom:4px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.metric{background:#111319;border:1px solid #2b2e37;border-radius:12px;padding:12px}.metric .label{color:#aeb1bb;font-size:12px}.metric .value{font-size:18px;font-weight:800;margin-top:3px;word-break:break-word}.metric .sub{color:#aeb1bb;font-size:12px;margin-top:4px;word-break:break-word}.candidate{display:grid;grid-template-columns:34px 1fr auto auto;gap:8px;align-items:center;padding:9px 10px;border-bottom:1px solid #30333d;font-size:13px}.candidate:last-child{border-bottom:0}.candidate.selected{background:#16271e}.candidate em{font-style:normal;font-size:10px;font-weight:800;color:#a7f3d0}.meta-row{display:grid;grid-template-columns:90px 42px 1fr;gap:8px;padding:8px 0;border-bottom:1px solid #30333d;align-items:start}.meta-row:last-child{border-bottom:0}.meta-row .yes{color:#a7f3d0}.meta-row .no{color:#fca5a5}.meta-row small{color:#c7c9d1;word-break:break-word}.guide{font-size:15px;line-height:1.5}.event-card{border-top:1px solid #30333d;padding:12px 0}.event-card:first-child{border-top:0}.event-head{display:flex;gap:10px;justify-content:space-between;align-items:center;margin-bottom:7px}.event-head time{font-size:12px;color:#aeb1bb}.event-head code{font-size:12px;color:#c9ffdc}.event-detail{display:flex;flex-wrap:wrap;gap:6px}.event-detail span{background:#111319;border-radius:7px;padding:4px 6px;font-size:11px;word-break:break-word}.event-detail b{color:#aeb1bb;font-weight:600}details summary{cursor:pointer;font-weight:800;padding:4px 0}code{color:#c9ffdc}input{display:block;width:100%;max-width:430px;min-height:44px;margin:10px 0;padding:10px;background:#101116;color:#fff;border:1px solid #59606b;border-radius:8px}button{min-height:44px;padding:10px 18px;border:0;border-radius:9px;background:#3879d7;color:#fff;font-weight:bold}button:disabled{opacity:.5}.bad-text{color:#fecaca}.diag-control-row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.diag-control-row h2{margin:0}.diag-off-btn{background:#30333d;border:1px solid #59606b;font-size:12px;min-height:36px;padding:6px 12px;white-space:nowrap}@media(max-width:640px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.media-metric{grid-column:1/-1}.candidate{grid-template-columns:28px 1fr auto}.candidate em{grid-column:2}.meta-row{grid-template-columns:82px 38px 1fr}.event-head{align-items:flex-start;flex-direction:column;gap:4px}}
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101116;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif}.wrap{max-width:920px;margin:auto;padding:18px 12px 40px}.card{background:#181a21;border:1px solid #30333d;border-radius:16px;padding:16px;margin-bottom:12px}.hero-card{padding:20px 16px 16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0}.diagnose-heading{text-align:center}.diagnose-heading h1{margin:0 0 6px}.diagnose-heading .muted{font-variant-numeric:tabular-nums}.muted{color:#aeb1bb;font-size:13px}.hero-state{text-align:center;margin:18px auto 8px;max-width:680px}.hero-state-title{font-size:21px;font-weight:850;margin-bottom:5px}.hero-state-copy{color:#c7c9d1;font-size:14px;line-height:1.45}.hero-state.tone-good .hero-state-title{color:#a7f3d0}.hero-state.tone-warn .hero-state-title{color:#fde68a}.hero-state.tone-bad .hero-state-title{color:#fecaca}.hero-meta{text-align:center;margin:10px 0 0}.hero-meta-source{display:block;margin-top:2px}.hero-diagnostics{display:flex;align-items:center;justify-content:center;gap:10px;border-top:1px solid #30333d;padding-top:14px;margin-top:14px;font-size:18px}.hero-diagnostics form{margin:0}.diag-status-toggle{cursor:pointer;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;min-width:62px;min-height:40px;padding:7px 14px;font-weight:900;font-size:15px;border:0}.diag-status-toggle.good{background:#123b29;color:#a7f3d0}.diag-status-toggle.neutral{background:#30333d;color:#e5e7eb}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}.metric{background:#111319;border:1px solid #2b2e37;border-radius:12px;padding:12px}.metric .label{color:#aeb1bb;font-size:12px}.metric .value{font-size:18px;font-weight:800;margin-top:3px;word-break:break-word}.metric .sub{color:#aeb1bb;font-size:12px;margin-top:4px;word-break:break-word}.media-metric{grid-column:1/-1}.guide{font-size:15px;line-height:1.5}.technical-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}.event-count{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:24px;padding:0 8px;margin-left:5px;border-radius:999px;background:#30333d;color:#e5e7eb;font-size:11px;vertical-align:middle}.event-card{border-top:1px solid #30333d;padding:14px 0}.event-card:first-child{border-top:0}.event-top{display:flex;gap:10px;justify-content:space-between;align-items:center;margin-bottom:8px}.event-top time{font-size:12px;color:#aeb1bb}.event-badge{display:inline-flex;align-items:center;border-radius:999px;padding:4px 8px;font-size:10px;font-weight:900;letter-spacing:.06em}.good{background:#123b29;color:#a7f3d0}.warn{background:#493812;color:#fde68a}.bad{background:#4a1d24;color:#fecaca}.neutral{background:#30333d;color:#e5e7eb}.event-title{font-size:15px;font-weight:800;margin-bottom:2px}.event-summary{font-size:13px;color:#d7d8dd;line-height:1.45;word-break:break-word}.event-metrics{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.event-metrics span{background:#111319;border:1px solid #292c34;border-radius:7px;padding:4px 7px;font-size:11px;word-break:break-word}.event-metrics b{color:#aeb1bb;font-weight:600;margin-right:3px}.event-detail{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}.event-detail span{background:#0f1116;border-radius:7px;padding:4px 6px;font-size:11px;word-break:break-word}.event-detail b{color:#aeb1bb;font-weight:600}code{color:#c9ffdc}.event-tabs{margin-top:10px}.event-toolbar{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0 12px}.event-tab-input{position:absolute;opacity:0;pointer-events:none}.event-tab-labels{display:flex;gap:8px;border-bottom:1px solid #30333d;margin-bottom:4px}.event-tab-label{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:7px 14px;color:#aeb1bb;font-size:12px;font-weight:800;cursor:pointer;border-bottom:2px solid transparent}.event-tab-panel{display:none}.event-tab-input#events-summary:checked~.event-tab-labels label[for=events-summary],.event-tab-input#events-raw:checked~.event-tab-labels label[for=events-raw]{color:#fff;border-bottom-color:#6aa3ff}.event-tab-input#events-summary:checked~.summary-panel,.event-tab-input#events-raw:checked~.raw-panel{display:block}.secondary-btn{display:flex;align-items:center;justify-content:center;width:100%;background:#262a33;border:1px solid #4b5160;min-height:36px;padding:7px 8px;font-size:11px;color:#fff;font-weight:800;border-radius:9px;white-space:nowrap}.raw-event-card{border-top:1px solid #30333d;padding:14px 0}.raw-event-card:first-child{border-top:0}.raw-event-top{display:flex;gap:10px;justify-content:space-between;align-items:flex-start;margin-bottom:8px}.raw-event-top code{font-size:12px}.raw-event-top time{font-size:12px;color:#aeb1bb}.clear-menu{display:block;min-width:0}.clear-menu[open]{grid-column:1/-1}.clear-menu[open]>summary{max-width:180px}.clear-menu>summary{list-style:none;cursor:pointer}.clear-menu>summary::-webkit-details-marker{display:none}.danger-btn{background:#3a2528;border-color:#714249;color:#fecaca}.clear-confirm{margin-top:8px;padding:10px;border:1px solid #4b5160;border-radius:10px;background:#111319;max-width:360px}.clear-confirm p{margin:0 0 8px}.clear-confirm button{background:#7f1d1d;min-height:36px;padding:7px 11px;font-size:12px;color:#fff;border:0;border-radius:9px;font-weight:800}.technical-meta{margin:7px 0 0}.bad-text{color:#fecaca}@media(max-width:640px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.event-toolbar{gap:6px}.secondary-btn{font-size:10px;padding:7px 5px}.event-top{align-items:flex-start;flex-direction:column;gap:5px}.hero-state{margin-top:15px}.card{padding:14px}.hero-card{padding:18px 14px 14px}}
+.source-heading{cursor:pointer;font-weight:800}.source-row{padding:8px 0;border-bottom:1px solid #30333d;font-size:13px;word-break:break-word}.source-row:last-child{border-bottom:0}
 </style></head>
 <body><main class="wrap">
-<section class="card"><header class="diagnose-heading"><h1>SmartSubs Diagnose</h1><div class="muted">${escapeHtml(formatMalaysiaTime(Date.now()))}</div></header><div class="status"><span class="pill ${status.tone}">${escapeHtml(status.tone === 'good' ? 'OK' : status.tone === 'bad' ? 'ERROR' : status.tone === 'warn' ? 'WAIT' : 'INFO')}</span><div class="status-copy"><div class="status-title">${escapeHtml(status.title)}</div><div class="muted">${escapeHtml(status.explanation)}</div></div></div><p class="muted">Latest subtitle request: ${escapeHtml(lastSubtitle ? formatMalaysiaTime(lastSubtitle.ts) : 'Not recorded')}</p></section>
-
-${controls}
+<section class="card hero-card"><header class="diagnose-heading"><h1>SmartSubs Diagnose</h1><div class="muted">${escapeHtml(formatMalaysiaTime(Date.now()))}</div></header><div class="hero-state tone-${escapeHtml(status.tone)}"><div class="hero-state-title">${escapeHtml(heroTitle)}</div><div class="hero-state-copy">${escapeHtml(heroExplanation)}</div></div><p class="muted hero-meta">${escapeHtml(heroMeta)}${heroSourceMeta ? `<span class="hero-meta-source">${escapeHtml(heroSourceMeta)}</span>` : ''}</p><div class="hero-diagnostics"><span>Diagnostics:</span><form method="POST" action="diagnose/toggle" autocomplete="off"><button class="diag-status-toggle good" type="submit" name="action" value="off" aria-label="Turn Diagnostics off">ON</button></form></div>${control.error ? `<p class="bad-text">${escapeHtml(control.error)}</p>` : ''}</section>
 
 <section class="card"><h2>Overview</h2><div class="grid">
 <div class="metric media-metric"><div class="label">Latest media</div><div class="value">${escapeHtml(compactMediaLabel(lastSubtitle))}</div></div>
-<div class="metric"><div class="label">Malay AI</div><div class="value">${escapeHtml(compactMalayAutoStatus(lastSubtitle))}</div><div class="sub">${escapeHtml(lastSubtitle ? `${lastSubtitle.subtitleCount || 0} tracks returned` : 'No subtitle request')}</div></div>
-<div class="metric"><div class="label">English source</div><div class="value">${escapeHtml(selectedId === 'Not available' ? '—' : selectedId)}</div></div>
-<div class="metric"><div class="label">Delivery</div><div class="value">${deliveryTime === undefined ? '—' : formatDuration(deliveryTime)}</div><div class="sub">${escapeHtml(deliveryForRequest?.cache || 'Not recorded')}</div></div>
-<div class="metric"><div class="label">Cold translation</div><div class="value">${coldTime === undefined ? '—' : formatDuration(coldTime)}</div><div class="sub">${coldTime === undefined ? 'Not recorded for this request' : 'Latest request'}</div></div>
-${hasNativeMalay ? `<div class="metric"><div class="label">Native Malay</div><div class="value">Available</div></div>` : ''}
+<div class="metric"><div class="label">Available</div><div class="value">${escapeHtml(lastSubtitle ? `${totalTracks} tracks` : '—')}</div><div class="sub">${escapeHtml(lastSubtitle ? availableSummary : 'No subtitle request')}</div></div>
+<div class="metric"><div class="label">English source</div><div class="value">${escapeHtml(sourceSelected ? selectedId : '—')}</div><div class="sub">${escapeHtml(sourceSelected ? 'OpenSubtitles · Auto-selected' : 'Not available')}</div></div>
+<div class="metric"><div class="label">Translation</div><div class="value">${escapeHtml(translationValue)}</div><div class="sub">${escapeHtml(translationSub)}</div></div>
+<div class="metric"><div class="label">Delivery</div><div class="value">${escapeHtml(deliveryValue)}</div><div class="sub">${escapeHtml(deliverySub)}</div></div>
 </div></section>
 
 ${guidance ? `<section class="card"><h2>Note</h2><div class="guide">${escapeHtml(guidance)}</div></section>` : ''}
 
 ${activeFailure ? `<section class="card"><h2>Latest failure</h2><div class="metric"><div class="label">${escapeHtml(activeFailure.event)}</div><div class="value">${escapeHtml(activeFailure.failureStage || activeFailure.status || 'Unknown stage')}</div><div class="sub">${escapeHtml(activeFailure.error || activeFailure.reason || '')}</div></div></section>` : ''}
 
-<section class="card"><details><summary>Source details</summary><p class="muted">${candidateCount} English sources in OpenSubtitles order. Source timing is not verified.</p>${sourceList}</details></section>
+<section class="card"><details><summary class="source-heading">Source details</summary><p class="muted">Primary English source is selected automatically. ${sourceIds.length} candidate IDs recorded in OpenSubtitles order. Source timing is not verified.</p>${sourceList}</details></section>
 
-<section class="card"><details><summary>Technical events (${sorted.length})</summary><p class="muted">Build ${BUILD_ID} | Verdict <code>${escapeHtml(verdict)}</code> | Events retained for up to 24 hours (MYT).</p>${rawEvents}</details></section>
+<section class="card"><div class="technical-heading"><h2>Technical Events <span class="event-count">${sorted.length}</span></h2></div><div class="event-tabs"><input class="event-tab-input" type="radio" name="event-tab" id="events-summary" checked><input class="event-tab-input" type="radio" name="event-tab" id="events-raw"><div class="event-toolbar"><button id="save-log-json" class="secondary-btn" type="button" title="Download full raw log as JSON">Save Log</button><button id="save-log-txt" class="secondary-btn" type="button" title="Download compact summary as text">Save Summary</button><details class="clear-menu"><summary class="secondary-btn danger-btn">Clear</summary><div class="clear-confirm"><p class="muted">Clear the current Diagnose timeline? Diagnostics stays ON. Older KV events are not deleted; they expire normally and are hidden by a new cutoff.</p><form method="POST" action="diagnose/clear"><button type="submit">Confirm clear</button></form></div></details></div><div class="event-tab-labels"><label class="event-tab-label" for="events-summary">Summary</label><label class="event-tab-label" for="events-raw">Raw</label></div><div class="event-tab-panel summary-panel"><p class="muted technical-meta">Build ${escapeHtml(BUILD_ID)} · ${escapeHtml(status.title)} · 24h history</p>${summaryEvents}</div><div class="event-tab-panel raw-panel"><p class="muted technical-meta">Build ${BUILD_ID} · Verdict <code>${escapeHtml(verdict)}</code> · 24-hour history (MYT)</p>${rawEvents}</div></div><textarea id="diagnose-export-data" hidden>${exportData}</textarea><script>${DIAG_EXPORT_SCRIPT}</script></section>
 </main></body></html>`
 }
 async function prefetchTranslation(options = {}) {
@@ -846,7 +1112,7 @@ export class TranslationDeliveryRelay {
       if (payload?.enabled !== true && payload?.enabled !== false) return new Response(null, { status: 400 })
       const previous = await this.ctx.storage.get('diagnostics:state')
       const enabled = payload.enabled === true
-      const since = enabled ? (previous?.enabled ? Number(previous.since) || Date.now() : Date.now()) : 0
+      const since = enabled ? (payload.reset === true || !previous?.enabled ? Date.now() : Number(previous.since) || Date.now()) : 0
       await this.ctx.storage.put('diagnostics:state', { enabled, since })
       return new Response(JSON.stringify({ enabled, since }), {
         headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
@@ -1672,7 +1938,24 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
       : []
     return send(200, 'text/html; charset=utf-8', renderConfiguredDiagnosePage(configId, events, {
       ...state, ready: diagnosticAdminReady(env) && Boolean(monitorStub(env, configId))
-    }), { noStore: true, csp: true, headers: { 'x-robots-tag': 'noindex, nofollow' } })
+    }), { noStore: true, csp: true, scriptHash: DIAG_EXPORT_SCRIPT_HASH, headers: { 'x-robots-tag': 'noindex, nofollow' } })
+  }
+
+  if (request.method === 'POST' && suffix === '/diagnose/clear') {
+    const state = await diagnosticState(env, configId)
+    if (!state.enabled) return send(409, 'text/plain; charset=utf-8', 'Diagnostics is not enabled', { noStore: true })
+    const stub = monitorStub(env, configId)
+    if (!stub) return send(503, 'text/plain; charset=utf-8', 'Diagnostics switch requires SMARTSUBS_DELIVERY', { noStore: true })
+    try {
+      const response = await stub.fetch('https://smartsubs-monitor.internal/diagnostics/state', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: true, reset: true })
+      })
+      if (!response.ok) throw new Error('Timeline reset failed')
+    } catch { return send(503, 'text/plain; charset=utf-8', 'Unable to clear Diagnose timeline. Try again.', { noStore: true }) }
+    return new Response(null, { status: 303, headers: {
+      location: new URL(request.url).pathname.replace(/\/clear$/, ''),
+      'cache-control': 'no-store', 'referrer-policy': 'no-referrer'
+    } })
   }
 
   if (request.method === 'POST' && suffix === '/diagnose/toggle') {

@@ -49,14 +49,14 @@ test('Compact diagnose keeps relevant status and moves source details behind dis
   assert.match(html, /9214195/)
   assert.match(html, /Source details/)
   assert.match(html, /Source timing is not verified/)
-  assert.match(html, /<summary>Source details<\/summary>/)
+  assert.match(html, /<summary class="source-heading">Source details<\/summary>/)
   assert.match(html, /<div class=\"label\">Delivery<\/div>/)
-  assert.match(html, /<div class="sub">HIT<\/div>/)
+  assert.match(html, /<div class="sub">Delivered · Cache hit<\/div>/)
   assert.match(html, /411 ms/)
   assert.doesNotMatch(html, /Verdict reference/)
   assert.doesNotMatch(html, /Player sync metadata<\/h2>/)
   assert.doesNotMatch(html, /Native Malay<\/div>/)
-  assert.match(html, /<summary>Technical events \(2\)<\/summary>/)
+  assert.match(html, /<h2>Technical Events <span class="event-count">2<\/span><\/h2>/)
   assert.match(html, /translation-delivered/)
 })
 
@@ -90,8 +90,8 @@ test('Compact diagnose keeps native Malay detail only when native subtitles exis
     id: 'tt123:1:2', result: 'native-malay', malayCount: 1,
     nativeDecision: 'native-malay-selected'
   }])
-  assert.match(html, /<div class="label">Native Malay<\/div>/)
-  assert.match(html, /<div class="value">Available<\/div>/)
+  assert.match(html, /1 Native Malay/)
+  assert.match(html, /<div class="label">Available<\/div>/)
 })
 
 test('Compact diagnose does not surface a stale failure after successful delivery', async () => {
@@ -101,6 +101,6 @@ test('Compact diagnose does not surface a stale failure after successful deliver
     { ts: 2000, event: 'translation-delivered', cache: 'HIT', totalMs: 234 }
   ])
   assert.doesNotMatch(html, /<h2>Latest failure<\/h2>/)
-  assert.match(html, /<summary>Technical events \(2\)<\/summary>/)
+  assert.match(html, /<h2>Technical Events <span class="event-count">2<\/span><\/h2>/)
   assert.match(html, /old-error/)
 })

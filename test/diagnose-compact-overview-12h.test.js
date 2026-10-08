@@ -9,7 +9,7 @@ const subtitle = (ts, id = 'tt1196946:2:23') => ({
   subtitleCount: 6, englishSelectedId: '9280753'
 })
 
-test('Compact Overview keeps 1 full-width media and 2x2 fixed metrics with readable values', async () => {
+test('Adapted V2 Overview keeps latest media and four lifecycle metrics', async () => {
   const render = await load()
   const html = render('config', [
     subtitle(when(13, 26, 40)),
@@ -20,10 +20,10 @@ test('Compact Overview keeps 1 full-width media and 2x2 fixed metrics with reada
   assert.match(html, /Latest subtitle request: 24\/09\/2026, 9:26:40 pm MYT/)
   assert.doesNotMatch(html, /MYT\s*\|\s*MYT/)
   assert.match(html, /class="metric media-metric"[^>]*><div class="label">Latest media<\/div><div class="value">S2E23 · tt1196946:2:23<\/div>/)
-  assert.match(html, /<div class="label">Malay AI<\/div><div class="value">Ready<\/div>/)
+  assert.match(html, /<div class="label">Available<\/div><div class="value">6 tracks<\/div>/)
   assert.match(html, /<div class="label">English source<\/div><div class="value">9280753<\/div>/)
-  assert.match(html, /<div class="label">Delivery<\/div><div class="value">375 ms<\/div><div class="sub">HIT<\/div>/)
-  assert.match(html, /<div class="label">Cold translation<\/div><div class="value">29\.9 s<\/div>/)
+  assert.match(html, /<div class="label">Delivery<\/div><div class="value">375 ms<\/div><div class="sub">Delivered · Cache hit<\/div>/)
+  assert.match(html, /<div class="label">Translation<\/div><div class="value">29\.9 s<\/div>/)
   assert.match(html, /<time>24\/09\/2026, 9:27:10 pm MYT<\/time>/)
   assert.match(html, /\.media-metric\{grid-column:1\/-1\}/)
   assert.match(html, /grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/)
@@ -37,9 +37,9 @@ test('Never display older media delivery and cold translation as latest request 
     subtitle(when(11), 'tt1196946:2:24')
   ])
   assert.match(html, /S2E24 · tt1196946:2:24/)
-  assert.match(html, /<div class="label">Delivery<\/div><div class="value">—<\/div><div class="sub">Not recorded<\/div>/)
-  assert.match(html, /<div class="label">Cold translation<\/div><div class="value">—<\/div><div class="sub">Not recorded for this request<\/div>/)
-  assert.match(html, /<summary>Technical events \(3\)<\/summary>/)
+  assert.match(html, /<div class="label">Delivery<\/div><div class="value">—<\/div><div class="sub">Not started<\/div>/)
+  assert.match(html, /<div class="label">Translation<\/div><div class="value">Waiting<\/div>/)
+  assert.match(html, /<h2>Technical Events <span class="event-count">3<\/span><\/h2>/)
 })
 
 test('OFF view keeps centered heading, MYT 12-hour clock and protected ON controls', async () => {
