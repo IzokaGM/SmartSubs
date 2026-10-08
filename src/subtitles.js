@@ -32,12 +32,27 @@ function diagnosticSubtitleId(subtitle, index = 0) {
   return value == null || value === '' ? `index-${index}` : String(value)
 }
 
+function trackedEnglishSourceId(subtitle, index = 0) {
+  if (!subtitle || typeof subtitle !== 'object') return `index-${index}`
+  // The translation token carries subtitle.id only. Match that token identity,
+  // even if OpenSubtitles supplies other optional ID fields.
+  const value = subtitle.id
+  if (value != null && String(value).trim()) {
+    const id = String(value).trim()
+    return /^[A-Za-z0-9_.-]{1,80}$/.test(id) ? id
+      : `id-${crypto.createHash('sha256').update(id).digest('hex').slice(0, 12)}`
+  }
+  // This ID is for Diagnose only; do not alter English track IDs or tokens.
+  return subtitle.url ? crypto.createHash('sha1').update(String(subtitle.url)).digest('hex').slice(0, 12)
+    : `index-${index}`
+}
+
 function englishSelectionDiagnostics(upstream, selectedEnglish) {
   const candidates = dedupeSubtitles(getEnglishSubtitles(upstream))
   return {
     englishCandidateCount: candidates.length,
-    englishSelectedId: selectedEnglish ? diagnosticSubtitleId(selectedEnglish) : '',
-    englishSourceIds: candidates.slice(0, 5).map((subtitle, index) => diagnosticSubtitleId(subtitle, index))
+    englishSelectedId: selectedEnglish ? trackedEnglishSourceId(selectedEnglish) : '',
+    englishSourceIds: candidates.slice(0, 5).map((subtitle, index) => trackedEnglishSourceId(subtitle, index))
   }
 }
 
@@ -107,6 +122,7 @@ async function handleSubtitles(args, options = {}) {
       requestId, type: args.type, id: args.id, upstreamMs,
       upstreamCount: upstream.length, malayCount: malay.length,
       englishFound: Boolean(english), ...selectionDiagnostic,
+      sourceId: english ? selectionDiagnostic.englishSelectedId : '',
       byokConfigured: Boolean(apiKey), autoReady: Boolean(ai),
       autoPrefetch, autoPrefetchReason,
       englishTrackCount: englishTracks.length, subtitleCount: subtitles.length,

@@ -87,8 +87,22 @@ async function readDiagnostics(kv, configId, limit = MAX_EVENTS) {
   return rows.filter(Boolean).sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))
 }
 
+// Prefer source-tagged lifecycle events for the latest selected English source;
+// old pre-upgrade logs without tags continue to render using legacy rules.
+function focusDiagnosticsOnLatestSource(events = []) {
+  const latestSubtitle = events.find(item => item.event === 'subtitle-result')
+  const selectedId = String(latestSubtitle?.sourceId || latestSubtitle?.englishSelectedId || '')
+  if (!latestSubtitle || !selectedId) return events
+  const hasTaggedLifecycle = events.some(item =>
+    item.event !== 'subtitle-result' && item.event !== 'subtitle-request' && item.sourceId
+  )
+  if (!hasTaggedLifecycle) return events
+  return events.filter(item => item === latestSubtitle ||
+    (item.event !== 'subtitle-result' && item.event !== 'subtitle-request' && String(item.sourceId || '') === selectedId))
+}
+
 function deriveVerdict(events = []) {
-  const rows = [...events].sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))
+  const rows = focusDiagnosticsOnLatestSource([...events].sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0)))
   const lastSubtitle = rows.find(item => item.event === 'subtitle-result')
   const lastTranslationFailed = rows.find(item => item.event === 'translation-failed')
   const lastTranslationDelivered = rows.find(item => item.event === 'translation-delivered')
@@ -145,5 +159,6 @@ module.exports = {
   sanitiseEvent,
   recordDiagnostic,
   readDiagnostics,
-  deriveVerdict
+  deriveVerdict,
+  focusDiagnosticsOnLatestSource
 }

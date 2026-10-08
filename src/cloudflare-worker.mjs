@@ -17,7 +17,7 @@ const { decodeTranslationTokenData } = tokenModule
 const { createUserConfigToken, decodeUserConfigToken, tokenFingerprint } = userConfigModule
 const { buildConfiguredUrls, validateGeminiApiKey, renderConfigurePage, escapeHtml } = configureModule
 const { nowMs, roundMs, logPerf } = perfModule
-const { recordDiagnostic, readDiagnostics, deriveVerdict, sanitiseEvent } = diagnosticsModule
+const { recordDiagnostic, readDiagnostics, deriveVerdict, sanitiseEvent, focusDiagnosticsOnLatestSource } = diagnosticsModule
 
 const BUILD_ID = 'final-stable-m20r3'
 const caches = new WeakMap()
@@ -71,6 +71,7 @@ const DIAG_EXPORT_SCRIPT = `(() => {
       'Latest media: ' + (overview.latestMedia || '—'),
       'Available: ' + (overview.tracksReturned == null ? '—' : overview.tracksReturned + ' tracks') + (overview.availableSummary ? ' · ' + overview.availableSummary : ''),
       'English source: ' + (overview.englishSource || '—'),
+      'Source journey: ' + (Array.isArray(payload.sourceJourney) ? payload.sourceJourney.map(stage => stage.stage + '=' + stage.status).join(' | ') : '—'),
       'Translation: ' + (overview.translationStatus || '—') + (overview.translationSummary ? ' · ' + overview.translationSummary : ''),
       'Delivery: ' + (overview.deliveryStatus || '—') + (overview.deliverySummary ? ' · ' + overview.deliverySummary : ''),
       '',
@@ -101,6 +102,21 @@ async function diagnosticState(env, configId) {
   if (!byConfig) { byConfig = new Map(); diagnosticStateByEnv.set(env, byConfig) }
   if (!byConfig.has(configId)) byConfig.set(configId, fetchState())
   return byConfig.get(configId)
+}
+
+// Diagnostic correlation only: do not change translation tokens, Queue payloads,
+// cache identity, or source selection. Never write subtitle URLs or tokens to KV.
+function diagnosticSourceId(tokenData) {
+  const raw = String(tokenData?.sourceId || '').trim()
+  if (raw) return /^[A-Za-z0-9_.-]{1,80}$/.test(raw) ? raw
+    : `id-${createHash('sha256').update(raw).digest('hex').slice(0, 12)}`
+  const url = String(tokenData?.url || '')
+  return url ? createHash('sha1').update(url).digest('hex').slice(0, 12) : ''
+}
+
+function diagnosticSourceFromToken(encoded, secret) {
+  try { return diagnosticSourceId(decodeTranslationTokenData(encoded, secret)) }
+  catch { return '' }
 }
 
 async function recordConfiguredDiagnostic(env, configId, event) {
@@ -438,7 +454,7 @@ function compactMetric(label, value) {
 
 function eventPresentation(item = {}) {
   const event = String(item.event || '')
-  const sourceId = String(item.sourceId || '')
+  const sourceId = String(item.sourceId || (item.event === 'subtitle-result' ? item.englishSelectedId : '') || '')
   const metrics = []
   let category = 'EVENT'
   let tone = 'neutral'
@@ -484,6 +500,10 @@ function eventPresentation(item = {}) {
     title = 'Existing Queue job reused'
     summary = sourceId ? `OpenSubtitles source ${sourceId}` : 'Duplicate translation job avoided'
     add('Status', item.status)
+  } else if (event === 'translation-direct-start') {
+    category = 'TRANSLATE'
+    title = 'Direct AI translation started'
+    summary = sourceId ? `Source ${sourceId}` : 'Direct translation fallback'
   } else if (event === 'queue-translation-start') {
     category = 'TRANSLATE'
     title = 'AI translation started'
@@ -491,7 +511,7 @@ function eventPresentation(item = {}) {
     add('Profile', item.profile)
     add('Concurrency', item.concurrency)
     add('Queue delay', item.queueDelayMs === undefined ? undefined : formatDuration(item.queueDelayMs))
-  } else if (event === 'queue-translation-complete' || event === 'prefetch-complete') {
+  } else if (event === 'queue-translation-complete' || event === 'prefetch-complete' || event === 'translation-direct-complete') {
     category = 'TRANSLATE'
     tone = 'good'
     title = 'AI translation ready'
@@ -551,6 +571,9 @@ function eventPresentation(item = {}) {
     summary = sourceId ? `OpenSubtitles source ${sourceId}` : (item.status || item.result || '')
   }
 
+  if (sourceId && !summary.includes(sourceId) && !metrics.some(metric => metric.label === 'Selected English' || metric.label === 'Source')) {
+    add('Source', sourceId)
+  }
   return { category, tone, title, summary, metrics: metrics.slice(0, 6) }
 }
 
@@ -606,14 +629,15 @@ function renderConfiguredDiagnosePage(configId, events, control = { enabled: tru
 </style></head><body><main class="wrap"><section class="card hero-card"><header class="diagnose-heading"><h1>SmartSubs Diagnose</h1><div class="muted">${escapeHtml(formatMalaysiaTime(Date.now()))}</div></header><div class="hero-state"><div class="hero-state-title">Diagnostics recording is off</div><div class="muted">Translation, Queue and cache still work normally.</div></div><div class="hero-diagnostics"><span>Diagnostics:</span><a class="diag-status-toggle neutral" href="#diag-admin">OFF</a></div></section>${controls}<p class="muted">Old events remain in KV until their existing 24-hour expiry. No diagnostic history is read while OFF.</p></main></body></html>`
   }
   const sorted = [...events].sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))
-  const verdict = deriveVerdict(sorted)
+  const focused = focusDiagnosticsOnLatestSource(sorted)
+  const verdict = deriveVerdict(focused)
   const status = verdictPresentation(verdict)
   const lastSubtitle = sorted.find(item => item.event === 'subtitle-result') || null
   // SmartSubs deliberately offers ONE primary Malay AI source and may run
   // Queue auto-prefetch before the player selects anything. Do not apply V2's
   // multi-candidate, on-demand selection boundaries to this addon.
   const latestRequestTs = Number(lastSubtitle?.ts || 0)
-  const sinceRequest = eventName => lastSubtitle ? sorted.find(item =>
+  const sinceRequest = eventName => lastSubtitle ? focused.find(item =>
     item.event === eventName && Number(item.ts || 0) >= latestRequestTs
   ) || null : null
   const lastTranslationRequest = sinceRequest('translation-request')
@@ -621,7 +645,7 @@ function renderConfiguredDiagnosePage(configId, events, control = { enabled: tru
   const lastQueueEnqueued = sinceRequest('queue-enqueued')
   const lastPending = sinceRequest('translation-pending') || sinceRequest('player-translation-queued')
   const deliveryForRequest = sinceRequest('translation-delivered')
-  const coldForRequest = sinceRequest('queue-translation-complete') || sinceRequest('prefetch-complete')
+  const coldForRequest = sinceRequest('queue-translation-complete') || sinceRequest('prefetch-complete') || sinceRequest('translation-direct-complete')
   const lastFailure = [sinceRequest('translation-failed'), sinceRequest('queue-translation-failed'), sinceRequest('prefetch-failed')]
     .filter(Boolean).sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0))[0] || null
   const mostRecentSuccess = [deliveryForRequest, coldForRequest]
@@ -678,6 +702,36 @@ function renderConfiguredDiagnosePage(configId, events, control = { enabled: tru
   const heroExplanation = status.explanation
   const heroMeta = `Latest subtitle request: ${lastSubtitle ? formatMalaysiaTime(lastSubtitle.ts) : 'Not recorded'}`
   const heroSourceMeta = sourceSelected ? `Primary English source ${selectedId}` : ''
+  const sourceHistory = sourceSelected ? focused.filter(item =>
+    String(item.sourceId || '') === String(selectedId) && Number(item.ts || 0) >= latestRequestTs
+  ) : []
+  const sourceLast = (...names) => sourceHistory.find(item => names.includes(item.event)) || null
+  const sourcePrefetch = sourceLast('prefetch-complete', 'prefetch-failed', 'prefetch-start', 'auto-prefetch-skipped', 'queue-enqueued')
+  const sourceQueue = sourceLast('queue-translation-complete', 'queue-translation-failed', 'queue-translation-start',
+    'queue-retry-scheduled', 'queue-enqueued', 'queue-deduped', 'player-translation-queued')
+  const sourceTranslation = sourceLast('queue-translation-complete', 'prefetch-complete', 'translation-direct-complete',
+    'queue-translation-failed', 'prefetch-failed', 'queue-translation-start', 'translation-direct-start', 'translation-failed')
+  const sourceDelivery = sourceLast('translation-delivered', 'queue-join-hit', 'translation-pending')
+  const sourceStages = [
+    { label: 'English', state: sourceSelected ? 'Selected' : 'Not available', event: lastSubtitle },
+    { label: 'Prefetch', state: !prefetchEnabled ? 'OFF (manual)' : sourcePrefetch?.event === 'prefetch-failed' ? 'Failed' :
+      sourcePrefetch?.event === 'prefetch-complete' ? 'Ready' : sourcePrefetch ? 'Triggered' : 'Not recorded', event: sourcePrefetch },
+    { label: 'Queue', state: !sourceQueue ? 'Not recorded' : sourceQueue.event === 'queue-translation-complete' ? 'Ready' :
+      sourceQueue.event === 'queue-translation-failed' ? 'Failed' : sourceQueue.event === 'queue-translation-start' ? 'Running' :
+        sourceQueue.event === 'queue-retry-scheduled' ? 'Retry scheduled' : 'Queued', event: sourceQueue },
+    { label: 'Gemini / Translation', state: !sourceTranslation ? (sourceDelivery?.cache === 'HIT' ? 'Cache hit · no Gemini' : 'Not recorded') :
+      ['queue-translation-complete', 'prefetch-complete', 'translation-direct-complete'].includes(sourceTranslation.event) ?
+        sourceTranslation.cache === 'HIT' ? 'Cache hit · no Gemini' : 'Ready' :
+        /failed$/.test(sourceTranslation.event) ? 'Failed' : 'Running', event: sourceTranslation },
+    { label: 'Delivery', state: sourceDelivery?.event === 'translation-delivered' ? 'Delivered' :
+      sourceDelivery?.event === 'queue-join-hit' ? 'Queue joined' :
+        sourceDelivery?.event === 'translation-pending' ? 'Waiting' : 'Not requested', event: sourceDelivery }
+  ]
+  const sourceJourney = sourceSelected ? sourceStages.map(stage => ({
+    stage: stage.label, status: stage.state, event: stage.event?.event || '',
+    at: stage.event ? formatMalaysiaTime(stage.event.ts) : ''
+  })) : []
+  const journeyHtml = sourceJourney.map(stage => `<div class="source-journey-row"><b>${escapeHtml(stage.stage)}</b><span>${escapeHtml(stage.status)}</span><small>${escapeHtml(stage.event ? stage.at : '—')}</small></div>`).join('')
   const sourceList = sourceIds.length
     ? sourceIds.map((id, index) => `<div class="source-row">#${index + 1} · <code>${escapeHtml(id)}</code>${String(id) === String(selectedId) ? ' · PRIMARY SOURCE' : ''}</div>`).join('')
     : '<p class="muted">Source IDs were not recorded for this request.</p>'
@@ -691,6 +745,7 @@ function renderConfiguredDiagnosePage(configId, events, control = { enabled: tru
     format: 'smartsubs-diagnose-log-v1',
     build: BUILD_ID,
     verdict,
+    sourceJourney,
     pageGeneratedAt: new Date().toISOString(),
     overview: {
       latestMedia: compactMediaLabel(lastSubtitle),
@@ -732,7 +787,7 @@ function renderConfiguredDiagnosePage(configId, events, control = { enabled: tru
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SmartSubs Diagnose</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#101116;color:#f4f4f5;font-family:system-ui,-apple-system,sans-serif}.wrap{max-width:920px;margin:auto;padding:18px 12px 40px}.card{background:#181a21;border:1px solid #30333d;border-radius:16px;padding:16px;margin-bottom:12px}.hero-card{padding:20px 16px 16px}h1{font-size:24px;margin:0}h2{font-size:17px;margin:0}.diagnose-heading{text-align:center}.diagnose-heading h1{margin:0 0 6px}.diagnose-heading .muted{font-variant-numeric:tabular-nums}.muted{color:#aeb1bb;font-size:13px}.hero-state{text-align:center;margin:18px auto 8px;max-width:680px}.hero-state-title{font-size:21px;font-weight:850;margin-bottom:5px}.hero-state-copy{color:#c7c9d1;font-size:14px;line-height:1.45}.hero-state.tone-good .hero-state-title{color:#a7f3d0}.hero-state.tone-warn .hero-state-title{color:#fde68a}.hero-state.tone-bad .hero-state-title{color:#fecaca}.hero-meta{text-align:center;margin:10px 0 0}.hero-meta-source{display:block;margin-top:2px}.hero-diagnostics{display:flex;align-items:center;justify-content:center;gap:10px;border-top:1px solid #30333d;padding-top:14px;margin-top:14px;font-size:18px}.hero-diagnostics form{margin:0}.diag-status-toggle{cursor:pointer;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;min-width:62px;min-height:40px;padding:7px 14px;font-weight:900;font-size:15px;border:0}.diag-status-toggle.good{background:#123b29;color:#a7f3d0}.diag-status-toggle.neutral{background:#30333d;color:#e5e7eb}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}.metric{background:#111319;border:1px solid #2b2e37;border-radius:12px;padding:12px}.metric .label{color:#aeb1bb;font-size:12px}.metric .value{font-size:18px;font-weight:800;margin-top:3px;word-break:break-word}.metric .sub{color:#aeb1bb;font-size:12px;margin-top:4px;word-break:break-word}.media-metric{grid-column:1/-1}.guide{font-size:15px;line-height:1.5}.technical-heading{display:flex;align-items:center;justify-content:space-between;gap:10px}.event-count{display:inline-flex;align-items:center;justify-content:center;min-width:26px;height:24px;padding:0 8px;margin-left:5px;border-radius:999px;background:#30333d;color:#e5e7eb;font-size:11px;vertical-align:middle}.event-card{border-top:1px solid #30333d;padding:14px 0}.event-card:first-child{border-top:0}.event-top{display:flex;gap:10px;justify-content:space-between;align-items:center;margin-bottom:8px}.event-top time{font-size:12px;color:#aeb1bb}.event-badge{display:inline-flex;align-items:center;border-radius:999px;padding:4px 8px;font-size:10px;font-weight:900;letter-spacing:.06em}.good{background:#123b29;color:#a7f3d0}.warn{background:#493812;color:#fde68a}.bad{background:#4a1d24;color:#fecaca}.neutral{background:#30333d;color:#e5e7eb}.event-title{font-size:15px;font-weight:800;margin-bottom:2px}.event-summary{font-size:13px;color:#d7d8dd;line-height:1.45;word-break:break-word}.event-metrics{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.event-metrics span{background:#111319;border:1px solid #292c34;border-radius:7px;padding:4px 7px;font-size:11px;word-break:break-word}.event-metrics b{color:#aeb1bb;font-weight:600;margin-right:3px}.event-detail{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}.event-detail span{background:#0f1116;border-radius:7px;padding:4px 6px;font-size:11px;word-break:break-word}.event-detail b{color:#aeb1bb;font-weight:600}code{color:#c9ffdc}.event-tabs{margin-top:10px}.event-toolbar{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0 12px}.event-tab-input{position:absolute;opacity:0;pointer-events:none}.event-tab-labels{display:flex;gap:8px;border-bottom:1px solid #30333d;margin-bottom:4px}.event-tab-label{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:7px 14px;color:#aeb1bb;font-size:12px;font-weight:800;cursor:pointer;border-bottom:2px solid transparent}.event-tab-panel{display:none}.event-tab-input#events-summary:checked~.event-tab-labels label[for=events-summary],.event-tab-input#events-raw:checked~.event-tab-labels label[for=events-raw]{color:#fff;border-bottom-color:#6aa3ff}.event-tab-input#events-summary:checked~.summary-panel,.event-tab-input#events-raw:checked~.raw-panel{display:block}.secondary-btn{display:flex;align-items:center;justify-content:center;width:100%;background:#262a33;border:1px solid #4b5160;min-height:36px;padding:7px 8px;font-size:11px;color:#fff;font-weight:800;border-radius:9px;white-space:nowrap}.raw-event-card{border-top:1px solid #30333d;padding:14px 0}.raw-event-card:first-child{border-top:0}.raw-event-top{display:flex;gap:10px;justify-content:space-between;align-items:flex-start;margin-bottom:8px}.raw-event-top code{font-size:12px}.raw-event-top time{font-size:12px;color:#aeb1bb}.clear-menu{display:block;min-width:0}.clear-menu[open]{grid-column:1/-1}.clear-menu[open]>summary{max-width:180px}.clear-menu>summary{list-style:none;cursor:pointer}.clear-menu>summary::-webkit-details-marker{display:none}.danger-btn{background:#3a2528;border-color:#714249;color:#fecaca}.clear-confirm{margin-top:8px;padding:10px;border:1px solid #4b5160;border-radius:10px;background:#111319;max-width:360px}.clear-confirm p{margin:0 0 8px}.clear-confirm button{background:#7f1d1d;min-height:36px;padding:7px 11px;font-size:12px;color:#fff;border:0;border-radius:9px;font-weight:800}.technical-meta{margin:7px 0 0}.bad-text{color:#fecaca}@media(max-width:640px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.event-toolbar{gap:6px}.secondary-btn{font-size:10px;padding:7px 5px}.event-top{align-items:flex-start;flex-direction:column;gap:5px}.hero-state{margin-top:15px}.card{padding:14px}.hero-card{padding:18px 14px 14px}}
-.source-heading{cursor:pointer;font-weight:800}.source-row{padding:8px 0;border-bottom:1px solid #30333d;font-size:13px;word-break:break-word}.source-row:last-child{border-bottom:0}
+.source-journey{margin-top:10px}.source-journey-row{display:grid;grid-template-columns:1.4fr 1fr 1.2fr;gap:8px;border-top:1px solid #30333d;padding:9px 0;font-size:12px;align-items:center}.source-journey-row span{font-weight:700}.source-journey-row small{color:#aeb1bb;text-align:right}.source-heading{cursor:pointer;font-weight:800}.source-row{padding:8px 0;border-bottom:1px solid #30333d;font-size:13px;word-break:break-word}.source-row:last-child{border-bottom:0}
 </style></head>
 <body><main class="wrap">
 <section class="card hero-card"><header class="diagnose-heading"><h1>SmartSubs Diagnose</h1><div class="muted">${escapeHtml(formatMalaysiaTime(Date.now()))}</div></header><div class="hero-state tone-${escapeHtml(status.tone)}"><div class="hero-state-title">${escapeHtml(heroTitle)}</div><div class="hero-state-copy">${escapeHtml(heroExplanation)}</div></div><p class="muted hero-meta">${escapeHtml(heroMeta)}${heroSourceMeta ? `<span class="hero-meta-source">${escapeHtml(heroSourceMeta)}</span>` : ''}</p><div class="hero-diagnostics"><span>Diagnostics:</span><form method="POST" action="diagnose/toggle" autocomplete="off"><button class="diag-status-toggle good" type="submit" name="action" value="off" aria-label="Turn Diagnostics off">ON</button></form></div>${control.error ? `<p class="bad-text">${escapeHtml(control.error)}</p>` : ''}</section>
@@ -748,6 +803,8 @@ function renderConfiguredDiagnosePage(configId, events, control = { enabled: tru
 ${guidance ? `<section class="card"><h2>Note</h2><div class="guide">${escapeHtml(guidance)}</div></section>` : ''}
 
 ${activeFailure ? `<section class="card"><h2>Latest failure</h2><div class="metric"><div class="label">${escapeHtml(activeFailure.event)}</div><div class="value">${escapeHtml(activeFailure.failureStage || activeFailure.status || 'Unknown stage')}</div><div class="sub">${escapeHtml(activeFailure.error || activeFailure.reason || '')}</div></div></section>` : ''}
+
+${sourceSelected ? `<section class="card"><h2>Source journey</h2><p class="muted">Source ID <code>${escapeHtml(selectedId)}</code> · Latest request only. Older or unrelated source events are excluded.</p><div class="source-journey">${journeyHtml}</div></section>` : ''}
 
 <section class="card"><details><summary class="source-heading">Source details</summary><p class="muted">Primary English source is selected automatically. ${sourceIds.length} candidate IDs recorded in OpenSubtitles order. Source timing is not verified.</p>${sourceList}</details></section>
 
@@ -773,9 +830,11 @@ async function prefetchTranslation(options = {}) {
     return null
   }
   if (!match) return null
+  const sourceId = diagnosticSourceFromToken(match[1], secret)
 
   await diagnosticFn(env.SMARTSUBS_CACHE, configId, {
     event: 'prefetch-start',
+    sourceId,
     status: 'background'
   }).catch(() => {})
 
@@ -784,6 +843,7 @@ async function prefetchTranslation(options = {}) {
     const tokenData = decodeTranslationTokenData(match[1], secret)
     await diagnosticFn(env.SMARTSUBS_CACHE, configId, {
       event: 'translation-request',
+      sourceId,
       status: 'prefetch'
     }).catch(() => {})
     const result = await getOrTranslateFn({
@@ -798,6 +858,7 @@ async function prefetchTranslation(options = {}) {
     const repair = result.translationStats || {}
     await diagnosticFn(env.SMARTSUBS_CACHE, configId, {
       event: 'prefetch-complete',
+      sourceId,
       cache: result.status,
       status: 'ready',
       totalMs,
@@ -833,6 +894,7 @@ async function prefetchTranslation(options = {}) {
     const totalMs = roundMs(nowMs() - startedAt)
     await diagnosticFn(env.SMARTSUBS_CACHE, configId, {
       event: 'prefetch-failed',
+      sourceId,
       status: 'background-failed',
       error: safeMessage(error, userConfig.apiKey),
       totalMs
@@ -1459,6 +1521,7 @@ async function enqueuePrefetchTranslation(options = {}) {
   const translationToken = parseAutoTranslationToken(autoUrl)
   const cacheKey = String(options.cacheKey || '')
   const requestedProfile = normaliseRequestedQueueProfile(options.queueProfile)
+  const sourceId = diagnosticSourceFromToken(translationToken, serverSecret(env))
 
   if (!translationToken || !configToken || !configId) return false
 
@@ -1472,6 +1535,7 @@ async function enqueuePrefetchTranslation(options = {}) {
     if (queueJobActive(job) && job.state !== 'ready') {
       await diagnosticFn(env.SMARTSUBS_CACHE, configId, {
         event: 'queue-deduped',
+      sourceId,
         status: job.state
       }).catch(() => {})
       return true
@@ -1488,6 +1552,7 @@ async function enqueuePrefetchTranslation(options = {}) {
     }
     await diagnosticFn(env.SMARTSUBS_CACHE, configId, {
       event: 'queue-enqueue-failed',
+      sourceId,
       status: 'queue-missing'
     }).catch(() => {})
     return false
@@ -1514,6 +1579,7 @@ async function enqueuePrefetchTranslation(options = {}) {
 
     await diagnosticFn(env.SMARTSUBS_CACHE, configId, {
       event: 'queue-enqueued',
+      sourceId,
       status: 'queued',
       profile: requestedProfile || 'background-default'
     }).catch(() => {})
@@ -1527,6 +1593,7 @@ async function enqueuePrefetchTranslation(options = {}) {
     }
     await diagnosticFn(env.SMARTSUBS_CACHE, configId, {
       event: 'queue-enqueue-failed',
+      sourceId,
       status: 'queue-send-failed',
       error: safeMessage(error, '')
     }).catch(() => {})
@@ -1551,6 +1618,7 @@ async function processQueueMessage(body, env, options = {}) {
   let retryMode = ''
   let queueProfile = null
   let queueProfileName = ''
+  let sourceId = ''
 
   if (!secret) throw new Error('SmartSubs server secret is not configured')
   if (payload.v !== 1 || !configToken || !translationToken || !configId) {
@@ -1565,6 +1633,7 @@ async function processQueueMessage(body, env, options = {}) {
   try {
     userConfig = decodeUserConfigToken(configToken, { secret })
     const tokenData = decodeTranslationTokenData(translationToken, secret)
+    sourceId = diagnosticSourceId(tokenData)
     env.__kvUsageTracker?.setMedia(tokenData.media)
     const expectedCacheKey = translationCacheKey(tokenData, userConfig.model, env)
     const suppliedCacheKey = String(payload.cacheKey || '')
@@ -1590,6 +1659,7 @@ async function processQueueMessage(body, env, options = {}) {
 
     await diagnosticFn(env.SMARTSUBS_CACHE, configId, {
       event: 'queue-translation-start',
+      sourceId,
       status: 'consumer',
       attempts,
       profile: queueProfileName,
@@ -1641,6 +1711,7 @@ async function processQueueMessage(body, env, options = {}) {
 
     await diagnosticFn(env.SMARTSUBS_CACHE, configId, {
       event: 'queue-translation-complete',
+      sourceId,
       cache: result.status,
       status: 'ready',
       attempts,
@@ -1717,6 +1788,7 @@ async function processQueueMessage(body, env, options = {}) {
     const perf = error?.smartsubsPerf || {}
     await diagnosticFn(env.SMARTSUBS_CACHE, configId, {
       event: 'queue-translation-failed',
+      sourceId,
       status: 'consumer-failed',
       attempts,
       profile: queueProfileName,
@@ -1818,6 +1890,7 @@ async function handleQueue(batch, env, options = {}) {
       const permanent = /Gemini HTTP (401|403)|Invalid SmartSubs queue message|Invalid SmartSubs queue cache key|Invalid user config token|Invalid translation token/i.test(text)
       const cacheKey = String(message?.body?.cacheKey || '')
       const configId = String(message?.body?.configId || '')
+      const sourceId = diagnosticSourceFromToken(message?.body?.translationToken, serverSecret(messageEnv))
 
       if (permanent) {
         if (validTranslationCacheKey(cacheKey)) {
@@ -1829,6 +1902,7 @@ async function handleQueue(batch, env, options = {}) {
         }
         await recordConfiguredDiagnostic(messageEnv, configId, {
           event: 'queue-retry-stopped',
+          sourceId,
           status: 'permanent',
           attempts: message.attempts,
           failureStage: queueFailureStage(error),
@@ -1849,6 +1923,7 @@ async function handleQueue(batch, env, options = {}) {
         }
         await recordConfiguredDiagnostic(messageEnv, configId, {
           event: 'queue-retry-scheduled',
+          sourceId,
           status: 'retrying',
           attempts,
           nextAttempt: attempts + 1,
@@ -1998,8 +2073,10 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
   const translationMatch = request.method === 'GET' && suffix.match(/^\/translated\/([A-Za-z0-9_.-]+)\.vtt$/)
   if (translationMatch) {
     const startedAt = nowMs()
+    const sourceId = diagnosticSourceFromToken(translationMatch[1], secret)
     await recordConfiguredDiagnostic(env, configId, {
       event: 'translation-request',
+      sourceId,
       status: 'player',
       ...translationRequestProbe(request)
     }).catch(() => {})
@@ -2032,6 +2109,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
         if (queueJobActive(job)) {
           await recordConfiguredDiagnostic(env, configId, {
             event: 'queue-join-start',
+            sourceId,
             status: job.state
           }).catch(() => {})
 
@@ -2061,6 +2139,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
             }
             await recordConfiguredDiagnostic(env, configId, {
               event: 'queue-join-hit',
+              sourceId,
               status: joined.jobStatus,
               waitMs: joinWaitMs,
               polls: joinPolls,
@@ -2070,6 +2149,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
             if (joinGraceHit) {
               await recordConfiguredDiagnostic(env, configId, {
                 event: 'queue-grace-hit',
+                sourceId,
                 status: joined.jobStatus,
                 waitMs: joinWaitMs,
                 graceMs: joinGraceMs
@@ -2078,6 +2158,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
           } else if (joined.outcome !== 'failed') {
             await recordConfiguredDiagnostic(env, configId, {
               event: 'translation-pending',
+              sourceId,
               status: joined.jobStatus,
               waitMs: joinWaitMs,
               polls: joinPolls,
@@ -2108,6 +2189,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
         if (queued) {
           await recordConfiguredDiagnostic(env, configId, {
             event: 'player-translation-queued',
+            sourceId,
             status: 'queued'
           }).catch(() => {})
 
@@ -2133,6 +2215,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
             if (joinGraceHit) {
               await recordConfiguredDiagnostic(env, configId, {
                 event: 'queue-grace-hit',
+                sourceId,
                 status: joined.jobStatus || 'queued',
                 waitMs: joinWaitMs,
                 graceMs: joinGraceMs
@@ -2147,6 +2230,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
           } else if (joined.outcome !== 'failed') {
             await recordConfiguredDiagnostic(env, configId, {
               event: 'translation-pending',
+              sourceId,
               status: joined.jobStatus || 'queued',
               waitMs: joinWaitMs,
               polls: joinPolls,
@@ -2161,6 +2245,10 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
 
         if (!result) {
           joinStatus = joinStatus || 'direct-fallback'
+          const directStartedAt = nowMs()
+          await recordConfiguredDiagnostic(env, configId, {
+            event: 'translation-direct-start', sourceId, status: 'direct-fallback'
+          }).catch(() => {})
           result = await cfGetOrTranslate({
             cache,
             upstreamUrl: tokenData.url,
@@ -2169,6 +2257,12 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
             apiKey: userConfig.apiKey,
             cacheVersion: cacheVersion(env)
           })
+          await recordConfiguredDiagnostic(env, configId, {
+            event: 'translation-direct-complete', sourceId, status: 'ready',
+            cache: result.status, totalMs: roundMs(nowMs() - directStartedAt),
+            geminiCalls: result.translationStats?.geminiCalls,
+            chunks: result.translationStats?.chunks
+          }).catch(() => {})
         }
       }
       env.__kvUsageTracker?.setCacheResult(result.status)
@@ -2185,6 +2279,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
       const repair = result.translationStats || {}
       await recordConfiguredDiagnostic(env, configId, {
         event: 'translation-delivered',
+        sourceId,
         cache: result.status,
         totalMs,
         waitMs: joinWaitMs,
@@ -2226,6 +2321,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
       const classified = classifyTranslationError(error)
       await recordConfiguredDiagnostic(env, configId, {
         event: 'translation-failed',
+        sourceId,
         status: classified.code,
         error: safeMessage(error, userConfig.apiKey),
         totalMs: roundMs(nowMs() - startedAt)
@@ -2276,6 +2372,7 @@ async function configuredRequest(request, env, token, suffix, executionCtx = nul
       if (autoUrl && result?.autoPrefetch === false) {
         await recordConfiguredDiagnostic(env, configId, {
           event: 'auto-prefetch-skipped',
+          sourceId: diagnosticSourceFromToken(parseAutoTranslationToken(autoUrl), secret),
           status: 'quota-protected',
           reason: result.autoPrefetchReason || 'user-selection-required'
         }).catch(() => {})
